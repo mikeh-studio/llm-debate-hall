@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Debate Hall</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="stage-noise"></div>
+    <main class="app-shell">
+      <header class="topbar chrome-card">
+        <div>
+          <p class="eyebrow">Debate Hall</p>
+          <h1>Council Chamber</h1>
+        </div>
+        <nav class="topnav">
+          <button class="nav-tab active" data-view="arena">Arena</button>
+          <button class="nav-tab" data-view="personas">Personas</button>
+          <button class="nav-tab" data-view="sessions">Sessions</button>
+        </nav>
+        <div class="session-pill" id="active-session-pill">Setup phase</div>
+      </header>
+
+      <section class="view is-active" id="view-arena">
+        <div class="arena-layout">
+          <aside class="control-panel chrome-card" id="control-panel">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">Step 1</p>
+                <h2>Seat The Chamber</h2>
+              </div>
+              <button id="add-seat">Add Debater</button>
+            </div>
+            <div class="step-note" id="setup-note">
+              Configure between two and five debaters. Choose preset, model, and persona before locking the chamber. Verified presets work without overrides; manual presets need custom command fields.
+            </div>
+            <div class="seat-setup" id="seat-setup"></div>
+
+            <div class="judge-config">
+              <div class="subhead">
+                <div>
+                  <p class="panel-kicker">Judge</p>
+                  <h3>Referee Throne</h3>
+                </div>
+              </div>
+              <label class="field">
+                <span>Name</span>
+                <input id="judge-name" value="Solon" />
+              </label>
+              <label class="field">
+                <span>Preset</span>
+                <select id="judge-preset"></select>
+              </label>
+              <label class="field">
+                <span>Model</span>
+                <select id="judge-model"></select>
+              </label>
+              <div class="preset-note" id="judge-preset-note"></div>
+              <label class="field">
+                <span>Command Override (JSON array)</span>
+                <textarea id="judge-command" rows="2" placeholder='["gemini"]'></textarea>
+              </label>
+              <label class="field">
+                <span>Args Override (JSON array)</span>
+                <textarea id="judge-args" rows="2" placeholder='["--model","{model}"]'></textarea>
+              </label>
+              <label class="field">
+                <span>Env Override (JSON object)</span>
+                <textarea id="judge-env" rows="2" placeholder='{"ANTHROPIC_API_KEY":"..."}'></textarea>
+              </label>
+            </div>
+
+            <div class="control-actions">
+              <button id="seats-set" class="primary-action">Seats Set</button>
+            </div>
+          </aside>
+
+          <section class="arena-stage chrome-card">
+            <div class="stage-head">
+              <div>
+                <p class="panel-kicker">Arena</p>
+                <h2 id="arena-topic">Chamber preview</h2>
+              </div>
+              <div class="stage-badges">
+                <span class="badge" id="arena-status">Setup</span>
+                <span class="badge" id="arena-seat-count">2 seats</span>
+              </div>
+            </div>
+
+            <section class="question-stage hidden" id="question-stage">
+              <div class="subhead">
+                <div>
+                  <p class="panel-kicker">Step 2</p>
+                  <h3>Set The Debate Question</h3>
+                </div>
+              </div>
+              <div class="step-note">
+                Enter a real debate question. If it is not a question, it will be rejected. You can ask the judge for suggestions first.
+              </div>
+              <label class="field">
+                <span>Debate Question</span>
+                <textarea
+                  id="debate-question"
+                  rows="4"
+                  placeholder="Should autonomous coding agents be allowed to negotiate directly with each other?"
+                ></textarea>
+              </label>
+              <div class="question-actions">
+                <button id="ask-suggestions">Ask Judge For Suggestions</button>
+                <button id="start-debate" class="primary-action">Start Debate</button>
+              </div>
+              <div class="question-feedback" id="question-feedback"></div>
+              <div class="suggestion-list" id="suggestion-list"></div>
+            </section>
+
+            <div class="locked-summary hidden" id="locked-summary">
+              <div class="locked-summary-body" id="locked-summary-body"></div>
+              <button id="edit-seats">Edit Seats</button>
+            </div>
+
+            <div class="judge-throne" id="judge-throne"></div>
+
+            <div class="arena-floor">
+              <div class="table-viewport">
+                <div class="council-table">
+                  <div class="table-core">
+                    <div class="table-title">Round Table</div>
+                    <div class="table-subtitle" id="table-subtitle">
+                      Lock the seats, then bring the debate question to the chamber.
+                    </div>
+                  </div>
+                  <div class="arena-seats" id="arena-seats"></div>
+                </div>
+              </div>
+
+              <aside class="dialogue-panel">
+                <div class="panel-kicker">Live Dialogue</div>
+                <div class="dialogue-card" id="dialogue-card">
+                  <div class="dialogue-speaker">No speaker yet</div>
+                  <div class="dialogue-round">Waiting for the chamber to open.</div>
+                  <p class="dialogue-text">The current paragraph will appear here one character at a time.</p>
+                </div>
+              </aside>
+            </div>
+          </section>
+
+          <aside class="combat-panel chrome-card">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">Control</p>
+                <h2>Session Feed</h2>
+              </div>
+              <button id="export-session">Export JSON</button>
+            </div>
+            <div class="session-meta" id="session-meta">No active session.</div>
+            <div class="cycle-controls" id="cycle-controls"></div>
+            <div class="winner-controls" id="winner-controls"></div>
+            <div class="combat-log" id="combat-log"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view" id="view-personas">
+        <div class="secondary-layout">
+          <section class="chrome-card persona-editor">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">Personas</p>
+                <h2>Forge A Philosophy</h2>
+              </div>
+              <button id="save-persona">Save Persona</button>
+            </div>
+            <input id="persona-id" type="hidden" />
+            <label class="field">
+              <span>Name</span>
+              <input id="persona-name" placeholder="Systems Skeptic" />
+            </label>
+            <label class="field">
+              <span>Philosophy Family</span>
+              <input id="persona-family" placeholder="Skepticism" />
+            </label>
+            <label class="field">
+              <span>Style</span>
+              <textarea id="persona-style" rows="4" placeholder="Clinical, suspicious of hype, obsessed with incentives."></textarea>
+            </label>
+            <label class="field">
+              <span>Core Values (comma separated)</span>
+              <input id="persona-values" placeholder="clarity, incentives, evidence" />
+            </label>
+            <label class="field">
+              <span>Debate Rules (comma separated)</span>
+              <input id="persona-rules" placeholder="question hidden incentives, reject vague claims" />
+            </label>
+            <label class="checkbox">
+              <input id="persona-selectable" type="checkbox" checked />
+              Selectable by agents
+            </label>
+          </section>
+
+          <section class="chrome-card persona-library">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">Library</p>
+                <h2>Available Personas</h2>
+              </div>
+            </div>
+            <div id="persona-list" class="persona-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="view-sessions">
+        <div class="secondary-layout single-column">
+          <section class="chrome-card sessions-hall">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">Sessions</p>
+                <h2>Saved Chambers</h2>
+              </div>
+              <button id="refresh-sessions">Refresh</button>
+            </div>
+            <div id="session-list" class="session-list"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js" defer></script>
+  </body>
+  </html>
