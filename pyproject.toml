@@ -1,0 +1,42 @@
+[project]
+name = "llm-debate-hall"
+version = "0.1.0"
+description = "For-fun local-first multi-agent debate hall with pluggable CLI backends."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Mike H" },
+]
+keywords = ["agents", "debate", "cli", "fastapi", "local-first", "llm"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Software Development :: Testing",
+]
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.27.0",
+  "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["llm_debate_hall*"]
+
+[tool.setuptools.package-data]
+llm_debate_hall = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
