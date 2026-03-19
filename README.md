@@ -1,5 +1,7 @@
 # LLM Debate Hall
 
+![LLM Debate Hall header](llm_debate_hall/static/llm-debate-hall-header_2.png)
+
 LLM Debate Hall is a for-fun, work-in-progress project for running a circle of local AI debaters. One inspiration for this project was the multi-agent council concept seen in Karpathy's `llm-council`, though this repo takes it in a different, more debate- and game-oriented direction. The current experiment is simple: give multiple agent CLIs a topic, let each one act as a chosen philosopher or persona, and see how the debate unfolds. The broader idea is larger than debate alone; the circle could expand into other multi-agent interactions over time.
 
 ## Status
