@@ -1,6 +1,10 @@
+import asyncio
+
 import llm_debate_hall.adapters.subprocess_adapter as subprocess_adapter
 from llm_debate_hall.adapters.base import AdapterRequest, PRESET_REGISTRY
 from llm_debate_hall.adapters.subprocess_adapter import (
+    InvocationPlan,
+    SubprocessDebateAdapter,
     SubprocessAdapterError,
     _PROBE_CACHE,
     _validate_success_output,
@@ -174,3 +178,45 @@ def test_probe_active_models_reuses_cache_for_empty_env(monkeypatch) -> None:
     assert calls == [(model_name, None) for model_name in preset.models]
 
     _PROBE_CACHE.clear()
+
+
+def test_generate_times_out_and_kills_subprocess(monkeypatch) -> None:
+    class HangingProcess:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.killed = False
+
+        async def communicate(self, stdin=None):
+            await asyncio.sleep(0.05)
+            return b"", b""
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = HangingProcess()
+    adapter = SubprocessDebateAdapter()
+
+    async def on_chunk(_chunk: str) -> None:
+        return None
+
+    monkeypatch.setattr(subprocess_adapter, "GENERATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        subprocess_adapter,
+        "build_invocation_plan",
+        lambda request: InvocationPlan(command=["fake-cli"], stdin_text=None, output_parser=lambda text: text),
+    )
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(subprocess_adapter.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    try:
+        asyncio.run(adapter.generate(make_request(command=["fake-cli"]), on_chunk))
+    except SubprocessAdapterError as exc:
+        assert "timed out during opening" in str(exc)
+        assert "openai:gpt-5" in str(exc)
+    else:
+        raise AssertionError("Expected the hanging subprocess to time out.")
+
+    assert process.killed is True

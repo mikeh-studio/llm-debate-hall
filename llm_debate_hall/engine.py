@@ -21,6 +21,7 @@ from llm_debate_hall.events import EventBroker
 from llm_debate_hall.storage import Storage
 
 REPLY_ROUNDS_PER_CYCLE = 2
+PERSONA_SELECTION_STATUS = "selecting_personas"
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -90,15 +91,27 @@ class DebateEngine:
         return self.storage.get_session(session_id)
 
     async def run_segment(self, session_id: str) -> None:
-        self.storage.update_session_status(session_id, "running")
-        await self.broker.publish(session_id, {"type": "status", "status": "running"})
         try:
             session = self.storage.get_session(session_id)
             selectable_personas = self.storage.get_selectable_personas()
             agents = [agent for agent in session["agents"] if agent["role"] == "debater"]
+            auto_agents = [agent for agent in agents if not agent.get("persona_id")]
 
-            await self._select_personas(session, agents, selectable_personas)
+            if auto_agents:
+                await self._set_session_status(session_id, PERSONA_SELECTION_STATUS)
+                entry = self.storage.add_thread_entry(
+                    session_id=session_id,
+                    kind="system",
+                    display_name="Debate Hall",
+                    display_text=self._persona_selection_text(auto_agents),
+                    payload={"event": "persona_selection_started"},
+                )
+                await self.broker.publish(session_id, {"type": "thread_entry_saved", "entry": entry})
+                await self._select_personas(session, agents, selectable_personas)
+                session = self.storage.get_session(session_id)
+                agents = [agent for agent in session["agents"] if agent["role"] == "debater"]
 
+            await self._set_session_status(session_id, "running")
             next_round_index = self._next_round_index(session)
             if not session["messages"]:
                 next_round_index = await self._play_round(
@@ -118,9 +131,16 @@ class DebateEngine:
                     round_index=next_round_index,
                 )
 
-            self.storage.update_session_status(session_id, "awaiting_continue")
-            await self.broker.publish(session_id, {"type": "status", "status": "awaiting_continue"})
+            await self._set_session_status(session_id, "awaiting_continue")
         except Exception as exc:
+            entry = self.storage.add_thread_entry(
+                session_id=session_id,
+                kind="system",
+                display_name="Debate Hall",
+                display_text=str(exc),
+                payload={"event": "session_failed"},
+            )
+            await self.broker.publish(session_id, {"type": "thread_entry_saved", "entry": entry})
             self.storage.update_session_status(session_id, "failed")
             await self.broker.publish(
                 session_id,
@@ -603,6 +623,14 @@ class DebateEngine:
         if not session["rounds"]:
             return 1
         return max(round_item["round_index"] for round_item in session["rounds"]) + 1
+
+    def _persona_selection_text(self, auto_agents: list[dict[str, Any]]) -> str:
+        names = ", ".join(agent["display_name"] for agent in auto_agents)
+        return f"Selecting personas for {names} before opening statements."
+
+    async def _set_session_status(self, session_id: str, status: str) -> None:
+        self.storage.update_session_status(session_id, status)
+        await self.broker.publish(session_id, {"type": "status", "status": status})
 
     def _spawn(self, session_id: str, coroutine_factory: Callable[[], asyncio.Future | Any]) -> None:
         existing = self._threads.get(session_id)

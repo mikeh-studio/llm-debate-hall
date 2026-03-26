@@ -1,6 +1,8 @@
 const SAMPLE_NAMES = ["Athena", "Burke", "Cassius", "Diotima", "Erasmus"];
 const SAMPLE_PRESETS = ["openai", "anthropic", "openai", "anthropic", "ollama"];
 const DRAFT_STORAGE_KEY = "llm-debate-hall:draft:v1";
+const SESSION_SYNC_TIMEOUT_MS = 8000;
+const SESSION_SYNC_INTERVAL_MS = 250;
 
 const state = {
   presets: [],
@@ -474,6 +476,7 @@ function renderQuickActions() {
 function composerMode() {
   if (!state.activeSession) return "start";
   if (state.activeSession.status === "awaiting_continue") return "moderator";
+  if (state.activeSession.status === "selecting_personas") return "running";
   if (state.activeSession.status === "running") return "running";
   if (state.activeSession.status === "awaiting_winner") return "winner";
   if (state.activeSession.status === "completed") return "completed";
@@ -816,8 +819,21 @@ async function connectSocket(sessionId) {
 
       if (event.type === "status") {
         state.activeSession.status = event.status;
-        if (event.status === "failed" && event.error) {
-          pushLocalSystemEntry(event.error);
+        if (event.status === "selecting_personas") {
+          setArenaFeedback("Selecting personas before opening statements...", "success");
+        } else if (event.status === "running") {
+          setArenaFeedback("Debate started.", "success");
+        } else if (event.status === "failed" && event.error) {
+          setArenaFeedback(event.error, "error");
+        }
+        if (
+          event.status === "selecting_personas" ||
+          event.status === "awaiting_continue" ||
+          event.status === "awaiting_winner" ||
+          event.status === "completed" ||
+          event.status === "failed"
+        ) {
+          await loadSession(sessionId, { reconnect: false, clearFeedback: false, setArenaView: false });
         }
         renderArena();
         if (
@@ -834,17 +850,44 @@ async function connectSocket(sessionId) {
   });
 }
 
-async function loadSession(sessionId) {
+async function loadSession(sessionId, options = {}) {
+  const { reconnect = true, clearFeedback = true, setArenaView = true } = options;
   const session = await fetchJson(`/api/sessions/${sessionId}`);
   state.activeSessionId = sessionId;
   state.activeSession = session;
   state.questionSuggestions = [];
-  setArenaFeedback();
+  if (clearFeedback) setArenaFeedback();
   applySessionToDraft(session);
   syncThreadEntriesFromSession(session);
   renderArena();
-  await connectSocket(sessionId);
-  setView("arena");
+  if (reconnect) {
+    await connectSocket(sessionId);
+  }
+  if (setArenaView) {
+    setView("arena");
+  }
+  return session;
+}
+
+async function syncSessionUntil(sessionId, predicate, options = {}) {
+  const {
+    timeoutMs = SESSION_SYNC_TIMEOUT_MS,
+    intervalMs = SESSION_SYNC_INTERVAL_MS,
+    reconnect = false,
+    clearFeedback = false,
+    setArenaView = false,
+  } = options;
+
+  const deadline = Date.now() + timeoutMs;
+  let latestSession = null;
+  while (Date.now() < deadline) {
+    latestSession = await loadSession(sessionId, { reconnect, clearFeedback, setArenaView });
+    if (predicate(latestSession)) {
+      return latestSession;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+  }
+  return latestSession;
 }
 
 async function askJudgeSuggestions() {
@@ -914,9 +957,24 @@ async function startDebate() {
     });
     await loadSession(session.id);
     await fetchJson(`/api/sessions/${session.id}/start`, { method: "POST" });
-    setArenaFeedback("Debate started.", "success");
+    const liveSession = await syncSessionUntil(
+      session.id,
+      (currentSession) =>
+        currentSession.status !== "draft" ||
+        (currentSession.thread_entries?.length || 0) > 0 ||
+        (currentSession.messages?.length || 0) > 0,
+      { reconnect: false, clearFeedback: false, setArenaView: false }
+    );
+    if (liveSession?.status === "selecting_personas") {
+      setArenaFeedback("Selecting personas before opening statements...", "success");
+    } else if (liveSession?.status === "failed") {
+      setArenaFeedback("Debate failed to start.", "error");
+    } else {
+      setArenaFeedback("Debate started.", "success");
+    }
     setView("arena");
     renderArena();
+    await refreshSessions();
   } catch (error) {
     console.error(error);
     setArenaFeedback(error.message || "Start Debate failed.", "error");
@@ -928,19 +986,38 @@ async function startDebate() {
 }
 
 async function continueDebate() {
+  const currentEntries = state.threadEntries.length;
+  setArenaFeedback("Continuing the debate...", "success");
+  renderArena();
   await fetchJson(`/api/sessions/${state.activeSession.id}/continue`, { method: "POST" });
+  await syncSessionUntil(
+    state.activeSession.id,
+    (session) =>
+      session.status !== "awaiting_continue" ||
+      (session.thread_entries?.length || 0) > currentEntries,
+    { reconnect: false, clearFeedback: false, setArenaView: false }
+  );
+  renderArena();
 }
 
 async function sendModeratorNote() {
   const input = $("arena-moderator-input");
   const text = input.value.trim();
   if (!text) throw new Error("Enter a moderator note or use Continue Round.");
+  const currentEntries = state.threadEntries.length;
   await fetchJson(`/api/sessions/${state.activeSession.id}/moderator-note`, {
     method: "POST",
     body: JSON.stringify({ text }),
   });
   input.value = "";
   setArenaFeedback("Moderator note sent.", "success");
+  await syncSessionUntil(
+    state.activeSession.id,
+    (session) =>
+      session.status !== "awaiting_continue" ||
+      (session.thread_entries?.length || 0) > currentEntries,
+    { reconnect: false, clearFeedback: false, setArenaView: false }
+  );
   renderArena();
 }
 

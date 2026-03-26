@@ -51,6 +51,7 @@ AUTH_ERROR_MARKERS = (
 PROBE_PROMPT = "Reply with the single word OK."
 PROBE_TIMEOUT_SECONDS = 20
 PROBE_CACHE_TTL_SECONDS = 300
+GENERATION_TIMEOUT_SECONDS = 45
 _PROBE_CACHE: dict[str, tuple[float, list[str]]] = {}
 _PROBE_CACHE_LOCK = threading.Lock()
 
@@ -144,6 +145,14 @@ def _build_malformed_output_error(request: AdapterRequest, raw_text: str) -> str
     return (
         f"{request.agent_name} returned non-JSON output for `{request.output_mode}` using "
         f"{request.preset_id}:{request.model_name}."
+    )
+
+
+def _build_timeout_error(request: AdapterRequest) -> str:
+    phase = request.output_mode.replace("_", " ")
+    return (
+        f"{request.agent_name} timed out during {phase} using "
+        f"{request.preset_id}:{request.model_name} after {GENERATION_TIMEOUT_SECONDS} seconds."
     )
 
 
@@ -442,7 +451,7 @@ class SubprocessDebateAdapter(DebateAdapter):
         )
 
         stdin_bytes = plan.stdin_text.encode("utf-8") if plan.stdin_text is not None else None
-        stdout, stderr = await process.communicate(stdin_bytes)
+        stdout, stderr = await self._communicate_with_timeout(process, request, stdin_bytes)
         raw_stdout = stdout.decode("utf-8", errors="replace").strip()
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
         if process.returncode != 0:
@@ -490,7 +499,7 @@ class SubprocessDebateAdapter(DebateAdapter):
                 stderr=asyncio.subprocess.PIPE,
                 env=_merged_env(request.env),
             )
-            stdout, stderr = await process.communicate()
+            stdout, stderr = await self._communicate_with_timeout(process, request)
             raw_stdout = stdout.decode("utf-8", errors="replace").strip()
             stderr_text = stderr.decode("utf-8", errors="replace").strip()
 
@@ -532,7 +541,7 @@ class SubprocessDebateAdapter(DebateAdapter):
                 stderr=asyncio.subprocess.PIPE,
                 env=_merged_env(request.env),
             )
-            stdout, stderr = await process.communicate()
+            stdout, stderr = await self._communicate_with_timeout(process, request)
             raw_stdout = stdout.decode("utf-8", errors="replace").strip()
             stderr_text = stderr.decode("utf-8", errors="replace").strip()
 
@@ -568,7 +577,7 @@ class SubprocessDebateAdapter(DebateAdapter):
             stderr=asyncio.subprocess.PIPE,
             env=_merged_env(request.env),
         )
-        stdout, stderr = await process.communicate()
+        stdout, stderr = await self._communicate_with_timeout(process, request)
         raw_stdout = stdout.decode("utf-8", errors="replace").strip()
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
         if process.returncode != 0:
@@ -585,3 +594,19 @@ class SubprocessDebateAdapter(DebateAdapter):
             await asyncio.sleep(0.01)
 
         return AdapterResponse(raw_text=raw_text, stream_status="simulated")
+
+    async def _communicate_with_timeout(
+        self,
+        process: asyncio.subprocess.Process,
+        request: AdapterRequest,
+        stdin_bytes: bytes | None = None,
+    ) -> tuple[bytes, bytes]:
+        try:
+            return await asyncio.wait_for(process.communicate(stdin_bytes), timeout=GENERATION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            try:
+                await process.communicate()
+            except Exception:
+                pass
+            raise SubprocessAdapterError(_build_timeout_error(request)) from exc

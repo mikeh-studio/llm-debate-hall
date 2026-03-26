@@ -6,8 +6,10 @@ Debate Hall is a for-fun experimental project. Small fixes, bug reports, and ide
 
 1. Run `pytest -q`.
 2. Run `node --check llm_debate_hall/static/app.js`.
-3. For UI or orchestration changes, run the live app with `uvicorn llm_debate_hall.main:app --reload` and verify the flow in the browser at `http://127.0.0.1:8000`.
-4. Include screenshots for visible arena or layout changes.
+3. Run `PYTHONPYCACHEPREFIX=/tmp/llm-debate-hall-pyc python3 -m compileall llm_debate_hall tests`.
+4. For UI or orchestration changes, run the live app with `uvicorn llm_debate_hall.main:app --reload` and verify the flow in the browser at `http://127.0.0.1:8000`.
+5. For debate-start changes, confirm the Arena shows persona selection or transcript entries after `Start Debate` instead of remaining blank.
+6. Include screenshots for visible arena or layout changes.
 
 ## PR Expectations
 
