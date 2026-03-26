@@ -1,30 +1,22 @@
 const SAMPLE_NAMES = ["Athena", "Burke", "Cassius", "Diotima", "Erasmus"];
 const SAMPLE_PRESETS = ["openai", "anthropic", "openai", "anthropic", "ollama"];
-const SEAT_ANGLES = {
-  2: [205, 335],
-  3: [165, 270, 15],
-  4: [150, 225, 315, 30],
-  5: [145, 205, 270, 335, 25],
-};
+const DRAFT_STORAGE_KEY = "llm-debate-hall:draft:v1";
 
 const state = {
   presets: [],
   personas: [],
   sessions: [],
-  activeView: "arena",
+  activeView: "setup",
   activeSessionId: null,
   activeSession: null,
   socket: null,
   seatConfigs: [],
   nextSeatId: 0,
-  setupLocked: false,
-  questionStageOpen: false,
-  questionFeedback: "",
-  questionFeedbackKind: "",
+  threadEntries: [],
+  pendingThreadEntry: null,
   questionSuggestions: [],
-  combatLog: [],
-  activeSpeaker: null,
-  typingInterval: null,
+  arenaFeedback: "",
+  arenaFeedbackKind: "",
   startInFlight: false,
 };
 
@@ -72,6 +64,64 @@ function parseCsv(value) {
     .filter(Boolean);
 }
 
+function readDraft() {
+  try {
+    const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistDraft() {
+  if (state.activeSession) return;
+  const payload = {
+    seatConfigs: state.seatConfigs,
+    judge: {
+      name: $("judge-name")?.value ?? "",
+      preset_id: $("judge-preset")?.value ?? "",
+      model_name: $("judge-model")?.value ?? "",
+      command: $("judge-command")?.value ?? "",
+      args: $("judge-args")?.value ?? "",
+      env: $("judge-env")?.value ?? "",
+    },
+    composer: $("main-composer")?.value ?? "",
+  };
+  window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function restoreDraft() {
+  const draft = readDraft();
+  if (!draft) return false;
+  if (Array.isArray(draft.seatConfigs) && draft.seatConfigs.length >= 2 && draft.seatConfigs.length <= 5) {
+    state.seatConfigs = draft.seatConfigs.map((seat, index) => ({
+      id: seat.id || `seat-${state.nextSeatId++}`,
+      display_name: seat.display_name || SAMPLE_NAMES[index] || `Debater ${index + 1}`,
+      preset_id: seat.preset_id || defaultSeatPresetId(index),
+      model_name: normalizedModelForPreset(seat.preset_id || defaultSeatPresetId(index), seat.model_name || ""),
+      persona_choice: seat.persona_choice || "auto",
+      command: seat.command || "",
+      args_template: seat.args_template || "",
+      env_json: seat.env_json || "",
+    }));
+  }
+  if (draft.judge) {
+    $("judge-name").value = draft.judge.name || "Solon";
+    $("judge-preset").value = draft.judge.preset_id || preferredPresetId();
+    $("judge-model").dataset.value = normalizedModelForPreset($("judge-preset").value, draft.judge.model_name || "");
+    $("judge-command").value = draft.judge.command || "";
+    $("judge-args").value = draft.judge.args || "";
+    $("judge-env").value = draft.judge.env || "";
+  }
+  $("main-composer").value = draft.composer || "";
+  return true;
+}
+
+function setArenaFeedback(message = "", kind = "") {
+  state.arenaFeedback = message;
+  state.arenaFeedbackKind = kind;
+}
+
 function personaOptions(selectedValue = "auto") {
   const options = [`<option value="auto" ${selectedValue === "auto" ? "selected" : ""}>Auto pick</option>`];
   state.personas
@@ -101,8 +151,8 @@ function presetById(presetId) {
   return state.presets.find((preset) => preset.id === presetId) || null;
 }
 
-function modelsForPreset(presetId) {
-  return presetById(presetId)?.models || [];
+function activeModelsForPreset(presetId) {
+  return presetById(presetId)?.active_models || [];
 }
 
 function verifiedPresetIds() {
@@ -120,25 +170,35 @@ function defaultSeatPresetId(index = 0) {
   const verified = verifiedPresetIds();
   const samplePresetId = SAMPLE_PRESETS[index];
   if (samplePresetId && verified.includes(samplePresetId)) return samplePresetId;
-  return verified[index % verified.length] || state.presets[0]?.id || "";
+  return verified[index % Math.max(verified.length, 1)] || state.presets[0]?.id || "";
 }
 
 function presetNoteText(presetId) {
   const preset = presetById(presetId);
   if (!preset) return "";
+  if (preset.model_validation_mode === "fallback" && preset.is_available === false) {
+    return `${preset.description} This CLI is not installed locally, so the selector is using the preset's built-in model list until the CLI is available.`;
+  }
   if (preset.is_available === false) {
     return `${preset.description} This CLI is not installed locally on this machine.`;
   }
+  if (preset.model_validation_mode === "fallback") {
+    return `${preset.description} Live model validation did not succeed here, so the preset is using its built-in fallback model list.`;
+  }
+  if (!(preset.active_models || []).length && !preset.requires_command_override) {
+    return `${preset.description} No models are currently selectable for this preset.`;
+  }
   if ((preset.missing_env_vars || []).length) {
-    return `${preset.description} Missing env: ${preset.missing_env_vars.join(", ")}. Add them below as a JSON object or start the server with those variables set.`;
+    return `${preset.description} Missing env: ${preset.missing_env_vars.join(", ")}. Add them below as JSON if needed.`;
   }
   return preset.requires_command_override
-    ? `${preset.description} Add a command override before starting.`
+    ? `${preset.description} Add a command override before running.`
     : preset.description;
 }
 
 function modelOptions(presetId, selectedModel = "") {
-  const models = modelsForPreset(presetId);
+  const models = activeModelsForPreset(presetId);
+  if (!models.length) return '<option value="">No active models available</option>';
   return models
     .map(
       (model) =>
@@ -148,7 +208,11 @@ function modelOptions(presetId, selectedModel = "") {
 }
 
 function defaultModelForPreset(presetId) {
-  return modelsForPreset(presetId)[0] || "";
+  return presetById(presetId)?.default_model || activeModelsForPreset(presetId)[0] || "";
+}
+
+function normalizedModelForPreset(presetId, requestedModel = "") {
+  return activeModelsForPreset(presetId).includes(requestedModel) ? requestedModel : defaultModelForPreset(presetId);
 }
 
 function buildSeatConfig(index = 0) {
@@ -194,7 +258,7 @@ function currentJudge() {
 }
 
 function personaLabel(personaId) {
-  if (!personaId) return "Auto pick";
+  if (!personaId) return "Auto";
   return state.personas.find((persona) => persona.id === personaId)?.name || personaId.replaceAll("_", " ");
 }
 
@@ -208,339 +272,326 @@ function setView(view) {
   });
 }
 
-function isArenaLive() {
-  return state.setupLocked || Boolean(state.activeSession);
+function capitalize(str) {
+  return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
-function shouldShowQuestionStage() {
-  return state.questionStageOpen && state.setupLocked && (!state.activeSession || state.activeSession.status === "draft");
+function renderArenaHeader() {
+  const topic = state.activeSession?.topic || "Waiting for a debate to begin";
+  const status = state.activeSession?.status || "setup";
+  const label = capitalize(status.replaceAll("_", " "));
+  $("arena-topic").textContent = topic;
+  $("arena-status").textContent = label;
+  $("arena-subtitle").textContent = state.activeSession
+    ? "A structured multi-agent debate rendered as one continuous transcript."
+    : "Configure debaters in Setup, then start the debate.";
+  const sessionPill = $("active-session-pill");
+  if (sessionPill) sessionPill.textContent = state.activeSession ? `${topic} · ${label}` : "";
+  $("export-session").disabled = !state.activeSessionId;
+  const composerShell = $("arena-composer-shell");
+  if (composerShell) {
+    composerShell.hidden = !state.activeSession || status === "completed" || status === "failed";
+  }
 }
 
-function setQuestionFeedback(message = "", kind = "") {
-  state.questionFeedback = message;
-  state.questionFeedbackKind = kind;
-}
-
-function renderSetupLayout() {
-  const layout = $("view-arena").querySelector(".arena-layout");
-  layout.classList.toggle("setup-screen", !isArenaLive());
-  layout.classList.toggle("arena-live", isArenaLive());
-}
-
-function renderLockedSummary() {
-  const summary = $("locked-summary");
-  summary.classList.toggle("hidden", !state.setupLocked);
-  if (!state.setupLocked) return;
-
+function renderParticipantStrip() {
   const judge = currentJudge();
-  const debaters = currentDebaters()
-    .map((seat) => `${seat.display_name} · ${personaLabel(seat.persona_id)}`)
-    .join(" | ");
-  $("locked-summary-body").innerHTML = `
-    <div class="locked-summary-title">Chamber locked</div>
-    <div>${escapeHtml(currentDebaters().length)} seats · ${escapeHtml(judge.display_name)} presiding</div>
-    <div>${escapeHtml(debaters)}</div>
-  `;
-  $("edit-seats").classList.toggle("hidden", Boolean(state.activeSession));
+  const participants = [
+    ...currentDebaters().map(
+      (seat) => `
+        <div class="participant-chip debater" data-seat-id="${escapeHtml(seat.id)}" role="button" tabindex="0">
+          <strong>${escapeHtml(seat.display_name)}</strong>
+          <span>${escapeHtml(seat.model_name || "No model")} · ${escapeHtml(personaLabel(seat.persona_id))}</span>
+        </div>
+      `
+    ),
+    `
+      <div class="participant-chip judge" data-role="judge" role="button" tabindex="0">
+        <strong>${escapeHtml(judge.display_name)}</strong>
+        <span>Judge · ${escapeHtml(judge.model_name || "No model")}</span>
+      </div>
+    `,
+  ];
+  $("participant-strip").innerHTML = participants.join("");
 }
 
-function renderQuestionStage() {
-  $("question-stage").classList.toggle("hidden", !shouldShowQuestionStage());
-  const feedback = $("question-feedback");
-  feedback.textContent = state.questionFeedback || "";
-  feedback.className = `question-feedback ${state.questionFeedbackKind ? `is-${state.questionFeedbackKind}` : ""}`;
+function renderArenaFeedback() {
+  const feedback = $("thread-feedback");
+  const visible = Boolean(state.arenaFeedback);
+  feedback.textContent = state.arenaFeedback || "";
+  feedback.className = `thread-feedback${visible ? " is-visible" : ""}${state.arenaFeedbackKind ? ` is-${state.arenaFeedbackKind}` : ""}`;
+}
+
+function renderSuggestionList() {
   $("suggestion-list").innerHTML = state.questionSuggestions
     .map(
       (suggestion) =>
         `<button class="suggestion-chip" data-suggestion="${escapeHtml(suggestion)}">${escapeHtml(suggestion)}</button>`
     )
     .join("");
-  $("ask-suggestions").disabled = state.startInFlight;
-  $("start-debate").disabled = state.startInFlight;
-  $("start-debate").textContent = state.startInFlight ? "Starting..." : "Start Debate";
 }
 
-function renderJudgeModelDropdown() {
-  const selectedPreset = $("judge-preset").value || state.presets[0]?.id || "";
-  const currentValue = $("judge-model").dataset.value || "";
-  const nextValue = modelsForPreset(selectedPreset).includes(currentValue)
-    ? currentValue
-    : defaultModelForPreset(selectedPreset);
-  $("judge-model").innerHTML = modelOptions(selectedPreset, nextValue);
-  $("judge-model").dataset.value = nextValue;
-  $("judge-preset-note").textContent = presetNoteText(selectedPreset);
-}
-
-function renderSeatSetup() {
-  const container = $("seat-setup");
-  container.innerHTML = state.seatConfigs
-    .map(
-      (seat, index) => `
-        <article class="seat-card" data-seat-id="${escapeHtml(seat.id)}">
-          <div class="seat-card-head">
-            <div class="seat-card-index">Seat ${index + 1}</div>
-            <button data-action="remove-seat" ${state.seatConfigs.length <= 2 ? "disabled" : ""}>Remove</button>
-          </div>
-          <label class="field">
-            <span>Name</span>
-            <input data-field="display_name" value="${escapeHtml(seat.display_name)}" />
-          </label>
-          <label class="field">
-            <span>Preset</span>
-            <select data-field="preset_id">${presetOptions(seat.preset_id)}</select>
-          </label>
-          <div class="preset-note">${escapeHtml(presetNoteText(seat.preset_id))}</div>
-          <label class="field">
-            <span>Model</span>
-            <select data-field="model_name">${modelOptions(seat.preset_id, seat.model_name)}</select>
-          </label>
-          <label class="field">
-            <span>Persona</span>
-            <select data-field="persona_choice">${personaOptions(seat.persona_choice)}</select>
-          </label>
-          <label class="field">
-            <span>Command Override (JSON array)</span>
-            <textarea data-field="command" rows="2" placeholder='["openai"]'>${escapeHtml(seat.command)}</textarea>
-          </label>
-          <label class="field">
-            <span>Args Override (JSON array)</span>
-            <textarea data-field="args_template" rows="2" placeholder='["--model","{model}"]'>${escapeHtml(seat.args_template)}</textarea>
-          </label>
-          <label class="field">
-            <span>Env Override (JSON object)</span>
-            <textarea data-field="env_json" rows="2" placeholder='{"OPENAI_API_KEY":"..."}'>${escapeHtml(seat.env_json)}</textarea>
-          </label>
-        </article>
-      `
-    )
-    .join("");
-
-  $("add-seat").disabled = state.seatConfigs.length >= 5;
-  renderArena();
-}
-
-function arenaSeatPosition(count, index) {
-  const angle = SEAT_ANGLES[count]?.[index] ?? (360 / count) * index;
-  const radians = (angle * Math.PI) / 180;
-  const radius = count >= 4 ? 43 : 41;
-  const x = 50 + Math.cos(radians) * radius;
-  const y = 50 + Math.sin(radians) * radius;
-  return { x: `${x}%`, y: `${y}%` };
-}
-
-function renderActiveSessionPill() {
-  const pill = $("active-session-pill");
-  if (!state.activeSession) {
-    pill.textContent = state.setupLocked ? "Question step" : "Setup phase";
-    return;
-  }
-  pill.textContent = `${state.activeSession.topic} · ${state.activeSession.status}`;
-}
-
-function renderJudgeThrone() {
-  const judge = currentJudge();
-  $("judge-throne").innerHTML = `
-    <div>
-      <div class="panel-kicker">Judge Throne</div>
-      <div class="seat-name">${escapeHtml(judge.display_name)}</div>
-      <div class="seat-model">${escapeHtml(judge.preset_id)} · ${escapeHtml(judge.model_name)}</div>
-    </div>
-  `;
-}
-
-function renderDialoguePanel() {
-  const card = $("dialogue-card");
-  if (!state.activeSpeaker) {
-    card.innerHTML = `
-      <div class="dialogue-speaker">No speaker yet</div>
-      <div class="dialogue-round">Waiting for the chamber to open.</div>
-      <p class="dialogue-text">The current paragraph will appear here one character at a time.</p>
-    `;
-    return;
-  }
-  card.innerHTML = `
-    <div class="dialogue-speaker">${escapeHtml(state.activeSpeaker.agentName)}</div>
-    <div class="dialogue-round">${escapeHtml(state.activeSpeaker.roundType)}</div>
-    <p class="dialogue-text">${escapeHtml(state.activeSpeaker.displayedText || "Speaking...")}</p>
-  `;
-}
-
-function renderArenaSeats() {
-  const seats = currentDebaters();
-  $("arena-seats").innerHTML = seats
-    .map((seat, index) => {
-      const position = arenaSeatPosition(seats.length, index);
-      const isActive = state.activeSpeaker?.agentId === seat.id;
-      const personaText = personaLabel(seat.persona_id);
-      const providerMode = seat.provider_session?.mode === "persistent"
-        ? "Persistent thread"
-        : seat.provider_session?.mode === "replay_fallback"
-          ? "Replay fallback"
-          : state.activeSession
-            ? "Stateless"
-            : "Seat ready";
-      return `
-        <article class="arena-seat ${isActive ? "active streaming" : ""}" style="left: ${position.x}; top: ${position.y};">
-          <div class="seat-order">Seat ${index + 1}</div>
-          <div class="seat-name">${escapeHtml(seat.display_name)}</div>
-          <div class="seat-model">${escapeHtml(seat.preset_id)} · ${escapeHtml(seat.model_name)}</div>
-          <div class="seat-persona">${escapeHtml(personaText)}</div>
-          <div class="seat-status">${escapeHtml(isActive ? "Speaking now" : providerMode)}</div>
-        </article>
-      `;
-    })
-    .join("");
-}
-
-function renderArenaMeta() {
-  const debaters = currentDebaters();
-  const topic = state.activeSession?.topic || $("debate-question").value.trim() || "Chamber preview";
-  $("arena-topic").textContent = topic;
-  $("arena-status").textContent = state.activeSession?.status || (shouldShowQuestionStage() ? "Question" : "Setup");
-  $("arena-seat-count").textContent = `${debaters.length} seats`;
-  $("table-subtitle").textContent = state.activeSession
-    ? "One paragraph at a time. Two reply rounds each before the chamber pauses."
-    : state.setupLocked
-      ? "Question stage is open. Ask the judge for suggestions or start the debate."
-      : "Lock the seats, then bring the debate question to the chamber.";
-  renderActiveSessionPill();
-}
-
-function renderArena() {
-  renderSetupLayout();
-  renderLockedSummary();
-  renderArenaMeta();
-  renderJudgeThrone();
-  renderDialoguePanel();
-  renderArenaSeats();
-}
-
-function judgeWinnerLabel(session) {
-  if (!session?.judge_score) return "Pending";
-  return (
-    session.agents.find((agent) => agent.id === session.judge_score.winner_agent_id)?.display_name ||
-    session.judge_score.winner_agent_id
-  );
-}
-
-function humanWinnerLabel(session) {
-  if (!session?.winner_human) return "Pending";
-  return session.agents.find((agent) => agent.id === session.winner_human)?.display_name || session.winner_human;
-}
-
-function renderSessionMeta() {
-  const meta = $("session-meta");
-  if (!state.activeSession) {
-    meta.textContent = "No active session.";
-    return;
-  }
-  meta.textContent = `${state.activeSession.topic} | Status: ${state.activeSession.status} | Judge: ${judgeWinnerLabel(
-    state.activeSession
-  )} | Manual winner: ${humanWinnerLabel(state.activeSession)}`;
-}
-
-function buildCombatLogFromSession(session) {
+function deriveThreadEntriesFromSession(session) {
+  if (session.thread_entries?.length) return session.thread_entries;
   const entries = [];
-  const debaters = session.agents.filter((agent) => agent.role === "debater");
-  debaters.forEach((agent) => {
-    if (agent.persona_id) {
-      entries.push({
-        type: "persona_selected",
-        title: `${agent.display_name} persona`,
-        body: personaLabel(agent.persona_id),
-      });
-    }
-  });
-
   session.rounds.forEach((round) => {
     entries.push({
-      type: "round_started",
-      title: `Round ${round.round_index}`,
-      body: round.round_type,
+      id: `round-${round.id}`,
+      kind: "system",
+      display_name: "Debate Hall",
+      display_text: `Round ${round.round_index} started: ${round.round_type}.`,
+      round_type: round.round_type,
+      round_index: round.round_index,
+      agent_id: null,
+      payload: { event: "round_started" },
+      created_at: round.started_at,
     });
     session.messages
       .filter((message) => message.round_index === round.round_index)
       .forEach((message) => {
         entries.push({
-          type: "message_saved",
-          title: `${message.agent_name} · ${message.round_type}`,
-          body: message.display_text,
+          id: `message-${message.id}`,
+          kind: "agent",
+          display_name: message.agent_name || message.agent_id,
+          display_text: message.display_text,
+          round_type: message.round_type,
+          round_index: message.round_index,
+          agent_id: message.agent_id,
+          payload: message.normalized_payload || {},
+          created_at: message.created_at,
         });
       });
   });
-
   if (session.judge_score) {
     entries.push({
-      type: "judge_result",
-      title: "Judge decision",
-      body: session.judge_score.rationale,
+      id: `judge-${session.judge_score.id}`,
+      kind: "judge",
+      display_name: currentJudge().display_name,
+      display_text: session.judge_score.rationale,
+      round_type: null,
+      round_index: null,
+      agent_id: session.judge_score.judge_agent_id,
+      payload: {
+        winner_agent_id: session.judge_score.winner_agent_id,
+        criteria: session.judge_score.criteria,
+      },
+      created_at: session.judge_score.created_at,
     });
   }
   return entries;
 }
 
-function renderCombatLog() {
-  const log = $("combat-log");
-  if (!state.combatLog.length) {
-    log.innerHTML = `<div class="combat-entry"><div class="combat-entry-body">The feed is empty.</div></div>`;
+function syncThreadEntriesFromSession(session) {
+  state.threadEntries = deriveThreadEntriesFromSession(session);
+  state.pendingThreadEntry = null;
+}
+
+function threadEntriesForRender() {
+  const entries = [...state.threadEntries];
+  if (state.pendingThreadEntry) entries.push(state.pendingThreadEntry);
+  return entries;
+}
+
+function threadEntryRoleLabel(entry) {
+  if (entry.kind === "moderator") return "Moderator";
+  if (entry.kind === "judge") return "Judge";
+  if (entry.kind === "system") return "System";
+  return entry.round_type || "Debater";
+}
+
+function renderThread() {
+  const thread = $("thread-view");
+  const entries = threadEntriesForRender();
+  if (!entries.length) {
+    thread.innerHTML = `
+      <div class="thread-empty">
+        <div>
+          <h3>No transcript yet</h3>
+          <p>Use the composer to start a debate, then the entire exchange will unfold here as one conversation.</p>
+        </div>
+      </div>
+    `;
     return;
   }
-  log.innerHTML = state.combatLog
+  thread.innerHTML = entries
     .map(
       (entry) => `
-        <article class="combat-entry event-${escapeHtml(entry.type)}">
-          <div class="combat-entry-head">
-            <span>${escapeHtml(entry.title)}</span>
-            <span>${escapeHtml(entry.meta || "")}</span>
+        <article class="thread-entry ${escapeHtml(entry.kind)} ${entry.pending ? "pending" : ""}">
+          <div class="thread-entry-head">
+            <div>
+              <div class="thread-entry-title">${escapeHtml(entry.display_name)}</div>
+              <div class="thread-entry-meta">${escapeHtml(threadEntryRoleLabel(entry))}</div>
+            </div>
+            <div class="thread-entry-role">${escapeHtml(entry.round_type || entry.kind)}</div>
           </div>
-          <div class="combat-entry-body">${escapeHtml(entry.body)}</div>
+          <div class="thread-entry-body">${entry.display_text ? escapeHtml(entry.display_text) : '<div class="thinking-dots"><span></span><span></span><span></span></div>'}</div>
         </article>
       `
     )
     .join("");
+  thread.scrollTop = thread.scrollHeight;
 }
 
-function renderCycleControls() {
-  const container = $("cycle-controls");
+function renderQuickActions() {
+  const container = $("quick-actions");
   container.innerHTML = "";
   if (!state.activeSession) return;
+
   if (state.activeSession.status === "awaiting_continue") {
     container.innerHTML = `
-      <button id="continue-debate">Keep Debating</button>
+      <button id="continue-debate">Continue Round</button>
+      <button id="judge-now">Judge Now</button>
       <button id="end-debate">End Debate</button>
     `;
     $("continue-debate").addEventListener("click", () => continueDebate().catch(alert));
+    $("judge-now").addEventListener("click", () => judgeNow().catch(alert));
     $("end-debate").addEventListener("click", () => endDebate().catch(alert));
-  } else if (state.activeSession.status === "running") {
-    container.innerHTML = `<div class="step-note">The chamber is live. Each speaker gets one paragraph per turn.</div>`;
-  } else if (state.activeSession.status === "failed") {
-    container.innerHTML =
-      '<div class="question-feedback is-error">The chamber failed to start or continue. Check the session feed for the reported error.</div>';
+    return;
   }
-}
 
-function renderWinnerControls() {
-  const container = $("winner-controls");
-  container.innerHTML = "";
-  if (!state.activeSession) return;
   if (state.activeSession.status === "awaiting_winner") {
-    const manualButtons = state.activeSession.agents
+    const buttons = state.activeSession.agents
       .filter((agent) => agent.role === "debater")
       .map(
         (agent) =>
           `<button class="manual-winner" data-agent-id="${escapeHtml(agent.id)}">Pick ${escapeHtml(agent.display_name)}</button>`
       )
       .join("");
-    container.innerHTML = `
-      <div class="step-note">The debate has ended. Pick a winner yourself or ask the judge to decide now.</div>
-      <div class="cycle-controls">${manualButtons}</div>
-      <button id="judge-pick-winner">Let Judge Pick</button>
-    `;
+    container.innerHTML = `${buttons}<button id="judge-pick-winner">Let Judge Decide</button>`;
     container.querySelectorAll(".manual-winner").forEach((button) => {
       button.addEventListener("click", () => voteWinner(button.dataset.agentId).catch(alert));
     });
     $("judge-pick-winner").addEventListener("click", () => judgePickWinner().catch(alert));
   }
+}
+
+function composerMode() {
+  if (!state.activeSession) return "start";
+  if (state.activeSession.status === "awaiting_continue") return "moderator";
+  if (state.activeSession.status === "running") return "running";
+  if (state.activeSession.status === "awaiting_winner") return "winner";
+  if (state.activeSession.status === "completed") return "completed";
+  if (state.activeSession.status === "failed") return "failed";
+  return "running";
+}
+
+function renderComposer() {
+  const textarea = $("main-composer");
+  const suggestionsButton = $("ask-suggestions");
+  const submitButton = $("composer-submit");
+  const locked = Boolean(state.activeSession);
+
+  $("composer-label").textContent = "Question";
+  $("composer-hint").textContent = "Ask a real question. The judge can suggest better prompts before you start.";
+  textarea.disabled = locked;
+  textarea.placeholder = "Should autonomous coding agents be allowed to negotiate directly with each other?";
+  suggestionsButton.hidden = locked;
+  suggestionsButton.disabled = state.startInFlight;
+  submitButton.textContent = state.startInFlight ? "Starting..." : "Start Debate";
+  submitButton.disabled = state.startInFlight || locked;
+}
+
+function renderJudgeModelDropdown() {
+  const selectedPreset = $("judge-preset").value || state.presets[0]?.id || "";
+  const currentValue = $("judge-model").dataset.value || "";
+  const nextValue = normalizedModelForPreset(selectedPreset, currentValue);
+  $("judge-model").innerHTML = modelOptions(selectedPreset, nextValue);
+  $("judge-model").dataset.value = nextValue;
+  $("judge-model").value = nextValue;
+  $("judge-model").disabled = Boolean(state.activeSession) || !activeModelsForPreset(selectedPreset).length;
+  $("judge-preset-note").textContent = presetNoteText(selectedPreset);
+}
+
+function renderSeatSetup() {
+  const container = $("seat-setup");
+  const locked = Boolean(state.activeSession);
+  container.innerHTML = state.seatConfigs
+    .map(
+      (seat, index) => `
+        <article class="seat-card" data-seat-id="${escapeHtml(seat.id)}">
+          <div class="seat-card-head">
+            <div class="seat-card-index">Seat ${index + 1}</div>
+            <button data-action="remove-seat" ${state.seatConfigs.length <= 2 || locked ? "disabled" : ""}>Remove</button>
+          </div>
+          <label class="field">
+            <span>Name</span>
+            <input data-field="display_name" value="${escapeHtml(seat.display_name)}" ${locked ? "disabled" : ""} />
+          </label>
+          <label class="field">
+            <span>Preset</span>
+            <select data-field="preset_id" ${locked ? "disabled" : ""}>${presetOptions(seat.preset_id)}</select>
+          </label>
+          <div class="preset-note">${escapeHtml(presetNoteText(seat.preset_id))}</div>
+          <label class="field">
+            <span>Model</span>
+            <select data-field="model_name" ${locked || !activeModelsForPreset(seat.preset_id).length ? "disabled" : ""}>${modelOptions(seat.preset_id, seat.model_name)}</select>
+          </label>
+          <label class="field">
+            <span>Persona</span>
+            <select data-field="persona_choice" ${locked ? "disabled" : ""}>${personaOptions(seat.persona_choice)}</select>
+          </label>
+          <details class="advanced-panel">
+            <summary>Advanced backend settings</summary>
+            <label class="field">
+              <span>Command Override (JSON array)</span>
+              <textarea data-field="command" rows="2" ${locked ? "disabled" : ""}>${escapeHtml(seat.command)}</textarea>
+            </label>
+            <label class="field">
+              <span>Args Override (JSON array)</span>
+              <textarea data-field="args_template" rows="2" ${locked ? "disabled" : ""}>${escapeHtml(seat.args_template)}</textarea>
+            </label>
+            <label class="field">
+              <span>Env Override (JSON object)</span>
+              <textarea data-field="env_json" rows="2" ${locked ? "disabled" : ""}>${escapeHtml(seat.env_json)}</textarea>
+            </label>
+          </details>
+        </article>
+      `
+    )
+    .join("");
+  $("add-seat").disabled = locked || state.seatConfigs.length >= 5;
+}
+
+function openSeatPopover(seatId) {
+  renderSeatSetup();
+  const container = $("seat-setup");
+  container.querySelectorAll(".seat-card").forEach((card) => {
+    card.hidden = card.dataset.seatId !== seatId;
+  });
+  container.hidden = false;
+  $("judge-config-container").hidden = true;
+  $("popover-title").textContent = "Edit Debater";
+  $("seat-popover").hidden = false;
+}
+
+function openJudgePopover() {
+  $("seat-setup").hidden = true;
+  $("judge-config-container").hidden = false;
+  $("popover-title").textContent = "Edit Judge";
+  $("seat-popover").hidden = false;
+}
+
+function closePopover() {
+  $("seat-popover").hidden = true;
+}
+
+function renderSettingsDrawer() {
+  renderSeatSetup();
+  renderJudgeModelDropdown();
+  ["judge-name", "judge-preset", "judge-command", "judge-args", "judge-env"].forEach((id) => {
+    $(id).disabled = Boolean(state.activeSession);
+  });
+}
+
+function renderArena() {
+  renderArenaHeader();
+  renderSettingsDrawer();
+  renderParticipantStrip();
+  renderArenaFeedback();
+  renderSuggestionList();
+  renderThread();
+  renderQuickActions();
+  renderComposer();
 }
 
 function renderPersonas() {
@@ -566,11 +617,15 @@ function renderSessions() {
     ? state.sessions
         .map(
           (session) => `
-            <article class="session-item">
+            <article class="session-item" data-id="${escapeHtml(session.id)}">
               <h3>${escapeHtml(session.topic)}</h3>
-              <p>Status: ${escapeHtml(session.status)}</p>
+              <p>Status: ${escapeHtml(capitalize(session.status.replaceAll("_", " ")))}</p>
               <p>Updated: ${escapeHtml(new Date(session.updated_at).toLocaleString())}</p>
-              <button data-session-id="${escapeHtml(session.id)}">Open In Arena</button>
+              <div class="session-item-actions">
+                <button data-session-id="${escapeHtml(session.id)}">Open In Arena</button>
+                <button data-reuse-id="${escapeHtml(session.id)}">Reuse Settings</button>
+                <button class="danger-action" data-delete-id="${escapeHtml(session.id)}">Delete</button>
+              </div>
             </article>
           `
         )
@@ -625,16 +680,13 @@ function validateSeatConfig() {
 }
 
 function applySessionToDraft(session) {
-  $("debate-question").value = session.topic;
-  state.setupLocked = true;
-  state.questionStageOpen = session.status === "draft";
   state.seatConfigs = session.agents
     .filter((agent) => agent.role === "debater")
     .map((agent, index) => ({
       id: agent.id || `seat-${index}`,
       display_name: agent.display_name,
       preset_id: agent.preset_id,
-      model_name: agent.model_name,
+      model_name: normalizedModelForPreset(agent.preset_id, agent.model_name),
       persona_choice: agent.persona_id || "auto",
       command: agent.command?.length ? JSON.stringify(agent.command) : "",
       args_template: agent.args_template?.length ? JSON.stringify(agent.args_template) : "",
@@ -644,66 +696,56 @@ function applySessionToDraft(session) {
   if (judge) {
     $("judge-name").value = judge.display_name;
     $("judge-preset").value = judge.preset_id;
-    $("judge-model").dataset.value = judge.model_name;
-    renderJudgeModelDropdown();
-    $("judge-model").value = judge.model_name;
+    $("judge-model").dataset.value = normalizedModelForPreset(judge.preset_id, judge.model_name);
     $("judge-command").value = judge.command?.length ? JSON.stringify(judge.command) : "";
     $("judge-args").value = judge.args_template?.length ? JSON.stringify(judge.args_template) : "";
     $("judge-env").value = judge.env && Object.keys(judge.env).length ? JSON.stringify(judge.env) : "";
   }
 }
 
-function stopTyping() {
-  if (state.typingInterval) {
-    clearInterval(state.typingInterval);
-    state.typingInterval = null;
+function upsertThreadEntry(entry) {
+  const existingIndex = state.threadEntries.findIndex((item) => item.id === entry.id);
+  if (existingIndex >= 0) {
+    state.threadEntries[existingIndex] = entry;
+  } else {
+    state.threadEntries.push(entry);
   }
 }
 
-function ensureTypingPump() {
-  if (state.typingInterval) return;
-  state.typingInterval = setInterval(() => {
-    if (!state.activeSpeaker || !state.activeSpeaker.pendingText) {
-      stopTyping();
-      return;
-    }
-    state.activeSpeaker.displayedText += state.activeSpeaker.pendingText[0];
-    state.activeSpeaker.pendingText = state.activeSpeaker.pendingText.slice(1);
-    renderDialoguePanel();
-    if (!state.activeSpeaker.pendingText) {
-      stopTyping();
-    }
-  }, 18);
+function pushLocalSystemEntry(text) {
+  upsertThreadEntry({
+    id: `local-${Date.now()}`,
+    kind: "system",
+    display_name: "Debate Hall",
+    display_text: text,
+    round_type: null,
+    round_index: null,
+    agent_id: null,
+    payload: { local: true },
+    created_at: new Date().toISOString(),
+  });
 }
 
-function queueDialogue(event) {
-  if (!state.activeSpeaker || state.activeSpeaker.agentId !== event.agent_id) {
-    state.activeSpeaker = {
-      agentId: event.agent_id,
-      agentName: event.agent_name,
-      roundType: event.round_type,
-      displayedText: "",
-      pendingText: "",
+function queueThreadChunk(event) {
+  if (!state.pendingThreadEntry || state.pendingThreadEntry.id !== event.entry_id) {
+    state.pendingThreadEntry = {
+      id: event.entry_id,
+      kind: event.kind || "agent",
+      display_name: event.display_name || "Speaker",
+      display_text: "",
+      round_type: event.round_type,
+      round_index: event.round_index,
+      agent_id: event.agent_id,
+      payload: {},
+      created_at: new Date().toISOString(),
+      pending: true,
     };
   }
-  state.activeSpeaker.pendingText += event.chunk;
-  ensureTypingPump();
-  renderArena();
+  state.pendingThreadEntry.display_text += event.chunk;
+  renderThread();
 }
 
-function finalizeDialogue(message) {
-  stopTyping();
-  state.activeSpeaker = {
-    agentId: message.agent_id,
-    agentName: message.agent_name || message.agent_id,
-    roundType: message.round_type,
-    displayedText: message.display_text,
-    pendingText: "",
-  };
-  renderArena();
-}
-
-function connectSocket(sessionId) {
+async function connectSocket(sessionId) {
   if (state.socket) state.socket.close();
   return new Promise((resolve) => {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
@@ -735,86 +777,43 @@ function connectSocket(sessionId) {
       if (event.type === "persona_selected") {
         const agent = state.activeSession.agents.find((item) => item.id === event.agent_id);
         if (agent) agent.persona_id = event.persona_id;
-        state.combatLog.push({
-          type: event.type,
-          title: `${event.agent_name} persona`,
-          body: personaLabel(event.persona_id),
-        });
-        renderArena();
-        renderCombatLog();
+        renderParticipantStrip();
         return;
       }
 
-      if (event.type === "round_started") {
-        state.combatLog.push({
-          type: event.type,
-          title: `Round ${event.round_index}`,
-          body: event.round_type,
-        });
-        renderCombatLog();
+      if (event.type === "thread_entry_chunk") {
+        queueThreadChunk(event);
         return;
       }
 
-      if (event.type === "message_chunk") {
-        queueDialogue(event);
-        return;
-      }
-
-      if (event.type === "message_saved") {
-        state.activeSession.messages.push(event.message);
-        finalizeDialogue(event.message);
-        state.combatLog.push({
-          type: event.type,
-          title: `${event.message.agent_name} · ${event.message.round_type}`,
-          body: event.message.display_text,
-        });
-        renderCombatLog();
-        return;
-      }
-
-      if (event.type === "judge_result") {
-        state.activeSession.judge_score = event.judge_score;
-        state.combatLog.push({
-          type: event.type,
-          title: "Judge decision",
-          body: event.judge_score.rationale,
-        });
-        renderCombatLog();
-        renderSessionMeta();
-        renderWinnerControls();
+      if (event.type === "thread_entry_saved") {
+        if (state.pendingThreadEntry?.id === event.entry.id) {
+          state.pendingThreadEntry = null;
+        }
+        upsertThreadEntry(event.entry);
+        renderThread();
         return;
       }
 
       if (event.type === "provider_session_state") {
         const agent = state.activeSession.agents.find((item) => item.id === event.agent_id);
         if (agent) agent.provider_session = event.provider_session;
-        state.combatLog.push({
-          type: event.type,
-          title: `${event.agent_name} session`,
-          body:
-            event.provider_session.mode === "persistent"
-              ? "Persistent provider thread active."
-              : `Replay fallback active. ${event.provider_session.last_error || ""}`.trim(),
-        });
-        renderArena();
-        renderCombatLog();
+        renderParticipantStrip();
+        return;
+      }
+
+      if (event.type === "judge_result") {
+        state.activeSession.judge_score = event.judge_score;
+        renderQuickActions();
         return;
       }
 
       if (event.type === "status") {
         state.activeSession.status = event.status;
         if (event.status === "failed" && event.error) {
-          state.combatLog.push({
-            type: event.type,
-            title: "Chamber error",
-            body: event.error,
-          });
+          pushLocalSystemEntry(event.error);
         }
         renderArena();
-        renderSessionMeta();
-        renderCycleControls();
-        renderWinnerControls();
-        renderCombatLog();
         if (
           event.status === "awaiting_continue" ||
           event.status === "awaiting_winner" ||
@@ -833,63 +832,35 @@ async function loadSession(sessionId) {
   const session = await fetchJson(`/api/sessions/${sessionId}`);
   state.activeSessionId = sessionId;
   state.activeSession = session;
-  state.combatLog = buildCombatLogFromSession(session);
-  state.activeSpeaker = session.messages.length
-    ? {
-        agentId: session.messages.at(-1).agent_id,
-        agentName: session.messages.at(-1).agent_name,
-        roundType: session.messages.at(-1).round_type,
-        displayedText: session.messages.at(-1).display_text,
-        pendingText: "",
-      }
-    : null;
+  state.questionSuggestions = [];
+  setArenaFeedback();
   applySessionToDraft(session);
-  renderSeatSetup();
-  renderQuestionStage();
+  syncThreadEntriesFromSession(session);
   renderArena();
-  renderSessionMeta();
-  renderCycleControls();
-  renderWinnerControls();
-  renderCombatLog();
   await connectSocket(sessionId);
   setView("arena");
-}
-
-async function openQuestionStep() {
-  validateSeatConfig();
-  state.setupLocked = true;
-  state.questionStageOpen = true;
-  state.activeSessionId = null;
-  state.activeSession = null;
-  state.combatLog = [];
-  state.activeSpeaker = null;
-  setQuestionFeedback("Seats locked. Now enter a debate question or ask the judge for suggestions.", "success");
-  renderQuestionStage();
-  renderArena();
-  renderSessionMeta();
-  renderCycleControls();
-  renderWinnerControls();
-  renderCombatLog();
 }
 
 async function askJudgeSuggestions() {
   validateSeatConfig();
   const payload = {
-    question: $("debate-question").value.trim(),
+    question: $("main-composer").value.trim(),
     judge: getJudgePayload(),
   };
+  setArenaFeedback("The judge is thinking about suggestions...", "success");
+  renderArena();
   const result = await fetchJson("/api/questions/suggestions", {
     method: "POST",
     body: JSON.stringify(payload),
   });
   state.questionSuggestions = result.suggestions || [];
-  setQuestionFeedback("The judge suggested three candidate questions.", "success");
-  renderQuestionStage();
+  setArenaFeedback("The judge suggested three debate questions.", "success");
+  renderArena();
 }
 
-async function validateQuestionOnly() {
+async function validateQuestionOnly(question) {
   const payload = {
-    question: $("debate-question").value.trim(),
+    question,
     judge: getJudgePayload(),
   };
   const result = await fetchJson("/api/questions/validate", {
@@ -897,23 +868,27 @@ async function validateQuestionOnly() {
     body: JSON.stringify(payload),
   });
   state.questionSuggestions = result.suggestions || [];
-  setQuestionFeedback(result.reason, result.accepted ? "success" : "error");
-  renderQuestionStage();
+  setArenaFeedback(result.reason, result.accepted ? "success" : "error");
+  renderArena();
   return result.accepted;
 }
 
 async function startDebate() {
   if (state.startInFlight) return;
   state.startInFlight = true;
-  setQuestionFeedback("Validating the debate question and opening the chamber...", "success");
-  renderQuestionStage();
+  setArenaFeedback("Opening the chamber...", "success");
+  renderArena();
   try {
     validateSeatConfig();
-    const accepted = await validateQuestionOnly();
-    if (!accepted) return;
+    const topic = $("main-composer").value.trim();
+    if (!topic || topic.split(/\s+/).length < 3) {
+      setArenaFeedback("Please write a question with at least a few words.", "error");
+      renderArena();
+      return;
+    }
 
     const payload = {
-      topic: $("debate-question").value.trim(),
+      topic,
       agents: state.seatConfigs.map((seat, index) => ({
         display_name: seat.display_name.trim() || `Debater ${index + 1}`,
         preset_id: seat.preset_id,
@@ -931,32 +906,18 @@ async function startDebate() {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    setQuestionFeedback("Chamber opened. Starting the debate...", "success");
     await loadSession(session.id);
     await fetchJson(`/api/sessions/${session.id}/start`, { method: "POST" });
-    state.questionStageOpen = false;
-    renderQuestionStage();
+    setArenaFeedback("Debate started.", "success");
+    setView("arena");
     renderArena();
   } catch (error) {
     console.error(error);
-    if (state.activeSession) {
-      state.activeSession.status = "failed";
-      state.combatLog.push({
-        type: "status",
-        title: "Chamber error",
-        body: error.message || "Start Debate failed.",
-      });
-      renderArena();
-      renderSessionMeta();
-      renderCycleControls();
-      renderCombatLog();
-    } else {
-      setQuestionFeedback(error.message || "Start Debate failed.", "error");
-      renderQuestionStage();
-    }
+    setArenaFeedback(error.message || "Start Debate failed.", "error");
+    renderArena();
   } finally {
     state.startInFlight = false;
-    renderQuestionStage();
+    renderArena();
   }
 }
 
@@ -964,13 +925,24 @@ async function continueDebate() {
   await fetchJson(`/api/sessions/${state.activeSession.id}/continue`, { method: "POST" });
 }
 
+async function sendModeratorNote() {
+  const input = $("arena-moderator-input");
+  const text = input.value.trim();
+  if (!text) throw new Error("Enter a moderator note or use Continue Round.");
+  await fetchJson(`/api/sessions/${state.activeSession.id}/moderator-note`, {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+  input.value = "";
+  setArenaFeedback("Moderator note sent.", "success");
+  renderArena();
+}
+
 async function endDebate() {
   const session = await fetchJson(`/api/sessions/${state.activeSession.id}/end`, { method: "POST" });
   state.activeSession = session;
+  syncThreadEntriesFromSession(session);
   renderArena();
-  renderSessionMeta();
-  renderCycleControls();
-  renderWinnerControls();
   await refreshSessions();
 }
 
@@ -984,17 +956,33 @@ async function voteWinner(agentId) {
 }
 
 async function judgePickWinner() {
+  pushLocalSystemEntry("The judge is deliberating...");
+  state.pendingThreadEntry = {
+    id: "judge-thinking",
+    kind: "judge",
+    display_name: currentJudge().display_name,
+    display_text: "",
+    pending: true,
+    round_type: null,
+    round_index: null,
+    agent_id: null,
+    payload: {},
+    created_at: new Date().toISOString(),
+  };
+  renderThread();
   const session = await fetchJson(`/api/sessions/${state.activeSession.id}/judge-decision`, {
     method: "POST",
     body: JSON.stringify({ judge: getJudgePayload() }),
   });
   state.activeSession = session;
-  state.combatLog = buildCombatLogFromSession(session);
+  syncThreadEntriesFromSession(session);
   renderArena();
-  renderSessionMeta();
-  renderWinnerControls();
-  renderCombatLog();
   await refreshSessions();
+}
+
+async function judgeNow() {
+  await endDebate();
+  await judgePickWinner();
 }
 
 async function savePersona() {
@@ -1020,7 +1008,7 @@ async function savePersona() {
   }
   clearPersonaForm();
   await loadPersonas();
-  renderSeatSetup();
+  renderSettingsDrawer();
 }
 
 async function loadPersonas() {
@@ -1033,6 +1021,34 @@ async function refreshSessions() {
   renderSessions();
 }
 
+async function reuseSession(sessionId) {
+  const session = await fetchJson(`/api/sessions/${sessionId}`);
+  state.activeSessionId = null;
+  state.activeSession = null;
+  state.threadEntries = [];
+  applySessionToDraft(session);
+  $("main-composer").value = session.topic;
+  persistDraft();
+  renderArena();
+  setView("setup");
+}
+
+async function deleteSession(sessionId) {
+  if (!confirm("Delete this chamber permanently?")) return;
+  await fetchJson(`/api/sessions/${sessionId}`, { method: "DELETE" });
+  if (state.activeSessionId === sessionId) {
+    state.activeSessionId = null;
+    state.activeSession = null;
+    state.threadEntries = [];
+    renderArena();
+  }
+  await refreshSessions();
+}
+
+async function handleComposerSubmit() {
+  await startDebate();
+}
+
 function registerViewListeners() {
   document.querySelectorAll(".nav-tab").forEach((button) => {
     button.addEventListener("click", () => setView(button.dataset.view));
@@ -1041,16 +1057,19 @@ function registerViewListeners() {
 
 function registerSeatListeners() {
   $("seat-setup").addEventListener("input", (event) => {
+    if (state.activeSession) return;
     const field = event.target.dataset.field;
     const card = event.target.closest("[data-seat-id]");
     if (!field || !card) return;
     const seat = state.seatConfigs.find((item) => item.id === card.dataset.seatId);
     if (!seat) return;
     seat[field] = event.target.value;
-    renderArena();
+    renderParticipantStrip();
+    persistDraft();
   });
 
   $("seat-setup").addEventListener("change", (event) => {
+    if (state.activeSession) return;
     const field = event.target.dataset.field;
     const card = event.target.closest("[data-seat-id]");
     if (!field || !card) return;
@@ -1059,79 +1078,96 @@ function registerSeatListeners() {
     seat[field] = event.target.value;
     if (field === "preset_id") {
       seat.model_name = defaultModelForPreset(seat.preset_id);
-      renderSeatSetup();
+      persistDraft();
+      renderArena();
       return;
     }
-    renderArena();
+    if (field === "model_name") {
+      seat.model_name = normalizedModelForPreset(seat.preset_id, seat.model_name);
+      persistDraft();
+      renderArena();
+      return;
+    }
+    renderParticipantStrip();
+    persistDraft();
   });
 
   $("seat-setup").addEventListener("click", (event) => {
+    if (state.activeSession) return;
     if (event.target.dataset.action !== "remove-seat") return;
     const card = event.target.closest("[data-seat-id]");
     if (!card || state.seatConfigs.length <= 2) return;
     state.seatConfigs = state.seatConfigs.filter((item) => item.id !== card.dataset.seatId);
-    renderSeatSetup();
+    closePopover();
+    persistDraft();
+    renderArena();
   });
 }
 
 function registerArenaListeners() {
   $("add-seat").addEventListener("click", () => {
-    if (state.seatConfigs.length >= 5) return;
+    if (state.activeSession || state.seatConfigs.length >= 5) return;
     state.seatConfigs.push(buildSeatConfig(state.seatConfigs.length));
-    renderSeatSetup();
-  });
-
-  $("seats-set").addEventListener("click", () => openQuestionStep().catch(alert));
-  $("edit-seats").addEventListener("click", () => {
-    state.setupLocked = false;
-    state.questionStageOpen = false;
-    setQuestionFeedback();
-    renderQuestionStage();
+    persistDraft();
     renderArena();
   });
-  $("ask-suggestions").addEventListener("click", async () => {
-    try {
-      await askJudgeSuggestions();
-    } catch (error) {
-      console.error(error);
-      setQuestionFeedback(error.message || "The judge could not provide suggestions.", "error");
-      renderQuestionStage();
-    }
-  });
-  $("start-debate").addEventListener("click", () => startDebate());
+
+  $("ask-suggestions").addEventListener("click", () => askJudgeSuggestions().catch((error) => {
+    console.error(error);
+    setArenaFeedback(error.message || "The judge could not provide suggestions.", "error");
+    renderArena();
+  }));
+
+  $("composer-submit").addEventListener("click", () => handleComposerSubmit().catch(alert));
+
   $("export-session").addEventListener("click", () => {
     if (!state.activeSessionId) return;
     window.open(`/api/sessions/${state.activeSessionId}/export`, "_blank");
   });
+
+  $("arena-moderator-submit").addEventListener("click", () => sendModeratorNote().catch(alert));
+
   $("suggestion-list").addEventListener("click", (event) => {
     const suggestion = event.target.dataset.suggestion;
     if (!suggestion) return;
-    $("debate-question").value = suggestion;
-    setQuestionFeedback("Suggestion applied. Start the debate when ready.", "success");
-    renderQuestionStage();
+    $("main-composer").value = suggestion;
+    setArenaFeedback("Suggestion applied.", "success");
     renderArena();
   });
-  $("debate-question").addEventListener("input", () => {
-    setQuestionFeedback();
-    renderQuestionStage();
-    renderArena();
+
+  $("main-composer").addEventListener("input", () => {
+    if (!state.activeSession) {
+      setArenaFeedback();
+      persistDraft();
+      renderArenaHeader();
+      renderArenaFeedback();
+    }
   });
 }
 
 function registerJudgeListeners() {
   $("judge-preset").addEventListener("change", () => {
+    if (state.activeSession) return;
     $("judge-model").dataset.value = defaultModelForPreset($("judge-preset").value);
+    persistDraft();
     renderJudgeModelDropdown();
-    renderArena();
+    renderParticipantStrip();
   });
   $("judge-model").addEventListener("change", () => {
     $("judge-model").dataset.value = $("judge-model").value;
-    renderArena();
+    persistDraft();
+    renderParticipantStrip();
   });
   ["judge-name", "judge-command", "judge-args"].forEach((id) => {
-    $(id).addEventListener("input", () => renderArena());
+    $(id).addEventListener("input", () => {
+      persistDraft();
+      renderParticipantStrip();
+    });
   });
-  $("judge-env").addEventListener("input", () => renderArena());
+  $("judge-env").addEventListener("input", () => {
+    persistDraft();
+    renderParticipantStrip();
+  });
 }
 
 function registerPersonaListeners() {
@@ -1144,12 +1180,46 @@ function registerPersonaListeners() {
   });
 }
 
+function registerPopoverListeners() {
+  $("participant-strip").addEventListener("click", (event) => {
+    const chip = event.target.closest(".participant-chip");
+    if (!chip) return;
+    if (chip.dataset.role === "judge") {
+      openJudgePopover();
+    } else if (chip.dataset.seatId) {
+      openSeatPopover(chip.dataset.seatId);
+    }
+  });
+
+  $("popover-close").addEventListener("click", () => closePopover());
+
+  document.addEventListener("click", (event) => {
+    const popover = $("seat-popover");
+    if (popover.hidden) return;
+    const content = popover.querySelector(".seat-popover-content");
+    if (!content.contains(event.target) && !$("participant-strip").contains(event.target) && event.target !== $("add-seat")) {
+      closePopover();
+    }
+  });
+}
+
 function registerSessionListeners() {
   $("refresh-sessions").addEventListener("click", () => refreshSessions().catch(alert));
   $("session-list").addEventListener("click", (event) => {
     const sessionId = event.target.dataset.sessionId;
-    if (!sessionId) return;
-    loadSession(sessionId).catch(alert);
+    if (sessionId) {
+      loadSession(sessionId).catch(alert);
+      return;
+    }
+    const reuseId = event.target.dataset.reuseId;
+    if (reuseId) {
+      reuseSession(reuseId).catch(alert);
+      return;
+    }
+    const deleteId = event.target.dataset.deleteId;
+    if (deleteId) {
+      deleteSession(deleteId).catch(alert);
+    }
   });
 }
 
@@ -1158,6 +1228,7 @@ async function boot() {
   registerSeatListeners();
   registerArenaListeners();
   registerJudgeListeners();
+  registerPopoverListeners();
   registerPersonaListeners();
   registerSessionListeners();
 
@@ -1165,12 +1236,10 @@ async function boot() {
   const defaultJudgePresetId = preferredPresetId();
   $("judge-preset").innerHTML = presetOptions(defaultJudgePresetId);
   $("judge-preset").value = defaultJudgePresetId;
-  renderJudgeModelDropdown();
 
   await loadPersonas();
   initializeSeatConfigs();
-  renderSeatSetup();
-  renderQuestionStage();
+  restoreDraft();
   renderArena();
   await refreshSessions();
 }
@@ -1179,3 +1248,26 @@ boot().catch((error) => {
   console.error(error);
   alert(error.message);
 });
+
+(function initThemeToggle() {
+  const saved = localStorage.getItem("theme");
+  if (saved) document.documentElement.setAttribute("data-theme", saved);
+  const btn = document.getElementById("theme-toggle");
+  if (!btn) return;
+  function updateLabel() {
+    const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+    btn.textContent = isDark ? "Light Mode" : "Dark Mode";
+  }
+  updateLabel();
+  btn.addEventListener("click", () => {
+    const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+    if (isDark) {
+      document.documentElement.removeAttribute("data-theme");
+      localStorage.removeItem("theme");
+    } else {
+      document.documentElement.setAttribute("data-theme", "dark");
+      localStorage.setItem("theme", "dark");
+    }
+    updateLabel();
+  });
+})();

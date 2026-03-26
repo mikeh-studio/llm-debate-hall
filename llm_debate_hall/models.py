@@ -75,6 +75,10 @@ class JudgeDecisionRequest(BaseModel):
     judge: JudgeConfigModel
 
 
+class ModeratorNoteRequest(BaseModel):
+    text: str
+
+
 class BackendPresetModel(BaseModel):
     id: str
     label: str
@@ -82,6 +86,8 @@ class BackendPresetModel(BaseModel):
     command: list[str]
     args_template: list[str]
     models: list[str] = Field(default_factory=list)
+    active_models: list[str] = Field(default_factory=list)
+    default_model: str | None = None
     invocation_mode: str = "manual_subprocess"
     requires_command_override: bool = False
     supports_persistent_sessions: bool = False

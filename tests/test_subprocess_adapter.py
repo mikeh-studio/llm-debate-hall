@@ -1,9 +1,12 @@
 from llm_debate_hall.adapters.base import AdapterRequest, PRESET_REGISTRY
 from llm_debate_hall.adapters.subprocess_adapter import (
+    SubprocessAdapterError,
+    _validate_success_output,
     build_claude_persistent_command,
     build_codex_exec_command,
     build_codex_resume_command,
     build_invocation_plan,
+    probe_active_models,
 )
 
 
@@ -61,8 +64,7 @@ def test_openai_preset_builds_codex_resume_command() -> None:
         "--model",
         "gpt-5",
         "--skip-git-repo-check",
-        "--color",
-        "never",
+        "--json",
         "--output-last-message",
         "/tmp/final-message.txt",
         "Return JSON only.",
@@ -124,3 +126,27 @@ def test_manual_override_required_presets_fail_clearly() -> None:
         assert "manual command override" in str(exc)
     else:
         raise AssertionError("Expected Gemini default preset to require a manual override.")
+
+
+def test_validate_success_output_rejects_model_error_text() -> None:
+    request = make_request(
+        preset_id="anthropic",
+        command=["claude"],
+        model_name="claude-opus-4.1",
+        output_mode="opening",
+    )
+
+    try:
+        _validate_success_output(
+            "There's an issue with the selected model (claude-opus-4.1). It may not exist or you may not have access to it. Run --model to pick a different model.",
+            request,
+        )
+    except SubprocessAdapterError as exc:
+        assert "unavailable" in str(exc)
+        assert "claude-opus-4.1" in str(exc)
+    else:
+        raise AssertionError("Expected model-selection error text to be rejected.")
+
+
+def test_probe_active_models_returns_mock_models() -> None:
+    assert probe_active_models(PRESET_REGISTRY["mock"]) == ["mock-model"]
