@@ -157,7 +157,13 @@ function activeModelsForPreset(presetId) {
 
 function verifiedPresetIds() {
   return state.presets
-    .filter((preset) => preset.is_available !== false && !preset.requires_command_override)
+    .filter(
+      (preset) =>
+        preset.is_available !== false &&
+        !preset.requires_command_override &&
+        !(preset.missing_env_vars || []).length &&
+        (preset.active_models || []).length
+    )
     .map((preset) => preset.id);
 }
 
@@ -176,6 +182,9 @@ function defaultSeatPresetId(index = 0) {
 function presetNoteText(presetId) {
   const preset = presetById(presetId);
   if (!preset) return "";
+  if ((preset.missing_env_vars || []).length) {
+    return `${preset.description} Missing env: ${preset.missing_env_vars.join(", ")}. Add them below as JSON if needed.`;
+  }
   if (preset.model_validation_mode === "fallback" && preset.is_available === false) {
     return `${preset.description} This CLI is not installed locally, so the selector is using the preset's built-in model list until the CLI is available.`;
   }
@@ -187,9 +196,6 @@ function presetNoteText(presetId) {
   }
   if (!(preset.active_models || []).length && !preset.requires_command_override) {
     return `${preset.description} No models are currently selectable for this preset.`;
-  }
-  if ((preset.missing_env_vars || []).length) {
-    return `${preset.description} Missing env: ${preset.missing_env_vars.join(", ")}. Add them below as JSON if needed.`;
   }
   return preset.requires_command_override
     ? `${preset.description} Add a command override before running.`

@@ -1,6 +1,8 @@
+import llm_debate_hall.adapters.subprocess_adapter as subprocess_adapter
 from llm_debate_hall.adapters.base import AdapterRequest, PRESET_REGISTRY
 from llm_debate_hall.adapters.subprocess_adapter import (
     SubprocessAdapterError,
+    _PROBE_CACHE,
     _validate_success_output,
     build_claude_persistent_command,
     build_codex_exec_command,
@@ -150,3 +152,25 @@ def test_validate_success_output_rejects_model_error_text() -> None:
 
 def test_probe_active_models_returns_mock_models() -> None:
     assert probe_active_models(PRESET_REGISTRY["mock"]) == ["mock-model"]
+
+
+def test_probe_active_models_reuses_cache_for_empty_env(monkeypatch) -> None:
+    preset = PRESET_REGISTRY["openai"]
+    calls: list[tuple[str, dict[str, str] | None]] = []
+
+    _PROBE_CACHE.clear()
+    monkeypatch.setattr(subprocess_adapter.shutil, "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(
+        subprocess_adapter,
+        "_probe_codex_model",
+        lambda _preset, model_name, env=None: calls.append((model_name, env)) or True,
+    )
+
+    first = probe_active_models(preset, {})
+    second = probe_active_models(preset, {})
+
+    assert first == preset.models
+    assert second == preset.models
+    assert calls == [(model_name, None) for model_name in preset.models]
+
+    _PROBE_CACHE.clear()

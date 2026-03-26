@@ -315,7 +315,12 @@ def _probe_ollama_models(preset: BackendPresetModel, env: dict[str, str] | None 
     return [model for model in installed_models if model in allowed]
 
 
+def _normalized_probe_env(env: dict[str, str] | None = None) -> dict[str, str] | None:
+    return env or None
+
+
 def probe_active_models(preset: BackendPresetModel, env: dict[str, str] | None = None) -> list[str]:
+    normalized_env = _normalized_probe_env(env)
     if preset.id == "mock":
         return list(preset.models)
     if preset.requires_command_override:
@@ -323,22 +328,22 @@ def probe_active_models(preset: BackendPresetModel, env: dict[str, str] | None =
     if not preset.command or shutil.which(preset.command[0]) is None:
         return []
 
-    if env is None:
+    if normalized_env is None:
         with _PROBE_CACHE_LOCK:
             cached = _PROBE_CACHE.get(preset.id)
             if cached and (time.time() - cached[0]) < PROBE_CACHE_TTL_SECONDS:
                 return list(cached[1])
 
     if preset.invocation_mode == "ollama_run":
-        active_models = _probe_ollama_models(preset, env)
+        active_models = _probe_ollama_models(preset, normalized_env)
     elif preset.invocation_mode == "codex_exec":
-        active_models = [model for model in preset.models if _probe_codex_model(preset, model, env)]
+        active_models = [model for model in preset.models if _probe_codex_model(preset, model, normalized_env)]
     elif preset.invocation_mode == "claude_print":
-        active_models = [model for model in preset.models if _probe_claude_model(preset, model, env)]
+        active_models = [model for model in preset.models if _probe_claude_model(preset, model, normalized_env)]
     else:
         active_models = []
 
-    if env is None:
+    if normalized_env is None:
         with _PROBE_CACHE_LOCK:
             _PROBE_CACHE[preset.id] = (time.time(), list(active_models))
     return active_models
