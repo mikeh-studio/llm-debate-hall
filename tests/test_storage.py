@@ -6,8 +6,7 @@ from llm_debate_hall.storage import Storage
 
 
 def test_storage_persona_and_session_roundtrip(tmp_path: Path) -> None:
-    storage = Storage(tmp_path / "debate.db")
-    storage.seed_personas(BUILTIN_PERSONAS)
+    storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
 
     created = storage.create_persona(
         PersonaCreate(
@@ -78,6 +77,13 @@ def test_storage_persona_and_session_roundtrip(tmp_path: Path) -> None:
         normalized_payload={"display_text": "Opening statement"},
         stream_status="completed",
     )
+    thread_entry = storage.add_thread_entry(
+        session_id=session["id"],
+        kind="moderator",
+        display_name="Moderator",
+        display_text="Press the strongest hidden assumption.",
+        payload={"source": "user"},
+    )
     storage.complete_round(round_id)
     storage.add_judge_score(
         session_id=session["id"],
@@ -101,6 +107,44 @@ def test_storage_persona_and_session_roundtrip(tmp_path: Path) -> None:
     assert exported["winner_auto"] == debater["id"]
     assert exported["winner_human"] == debater["id"]
     assert exported["messages"][0]["id"] == message["id"]
+    assert exported["thread_entries"][0]["id"] == thread_entry["id"]
     assert provider_session["provider_session_id"] == "thread-123"
     exported_debater = next(agent for agent in exported["agents"] if agent["id"] == debater["id"])
     assert exported_debater["provider_session"]["provider_session_id"] == "thread-123"
+
+
+def test_storage_migrates_legacy_db_personas_to_files(tmp_path: Path) -> None:
+    db_path = tmp_path / "debate.db"
+    personas_root = tmp_path / "personas"
+
+    storage = Storage(db_path, personas_root_path=personas_root)
+    with storage._connect() as conn:
+        conn.execute("DELETE FROM personas")
+        conn.execute(
+            """
+            INSERT INTO personas (
+                id, name, philosophy_family, style, core_values_json, debate_rules_json,
+                is_builtin, is_user_editable, is_selectable, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "db_custom_persona",
+                "DB Custom Persona",
+                "Pragmatism",
+                "Grounded and direct.",
+                '["evidence"]',
+                '["test assumptions"]',
+                0,
+                1,
+                1,
+                "2026-03-24T00:00:00+00:00",
+                "2026-03-24T00:00:00+00:00",
+            ),
+        )
+
+    migrated = Storage(db_path, personas_root_path=personas_root)
+
+    persona = migrated.get_persona("db_custom_persona")
+    assert persona["name"] == "DB Custom Persona"
+    assert (personas_root / "custom" / "db_custom_persona.json").exists()

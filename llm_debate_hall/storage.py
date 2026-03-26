@@ -4,11 +4,13 @@ import json
 import sqlite3
 import threading
 import uuid
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from llm_debate_hall.models import PersonaCreate, PersonaModel, PersonaUpdate
+from llm_debate_hall.personas import builtin_personas_dir, custom_personas_dir, load_persona_payload, personas_root
 
 
 def utc_now() -> str:
@@ -16,10 +18,24 @@ def utc_now() -> str:
 
 
 class Storage:
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        personas_root_path: str | Path | None = None,
+        builtin_personas_root_path: str | Path | None = None,
+    ) -> None:
         self.db_path = str(db_path)
         self._lock = threading.Lock()
+        self.personas_root = personas_root(personas_root_path)
+        self._builtin_source_root = personas_root(
+            builtin_personas_root_path if builtin_personas_root_path is not None else personas_root()
+        )
+        self._builtin_dir = builtin_personas_dir(self.personas_root)
+        self._custom_dir = custom_personas_dir(self.personas_root)
         self._ensure_db()
+        self._ensure_persona_store()
+        self._migrate_personas_from_db()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -95,6 +111,19 @@ class Storage:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS thread_entries (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    display_text TEXT NOT NULL,
+                    round_type TEXT,
+                    round_index INTEGER,
+                    agent_id TEXT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS judge_scores (
                     id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
@@ -122,85 +151,45 @@ class Storage:
             )
 
     def seed_personas(self, personas: list[PersonaModel]) -> None:
-        with self._lock, self._connect() as conn:
-            for persona in personas:
-                now = utc_now()
-                conn.execute(
-                    """
-                    INSERT INTO personas (
-                        id, name, philosophy_family, style, core_values_json, debate_rules_json,
-                        is_builtin, is_user_editable, is_selectable, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        name = excluded.name,
-                        philosophy_family = excluded.philosophy_family,
-                        style = excluded.style,
-                        core_values_json = excluded.core_values_json,
-                        debate_rules_json = excluded.debate_rules_json,
-                        is_builtin = excluded.is_builtin,
-                        is_user_editable = excluded.is_user_editable,
-                        is_selectable = excluded.is_selectable,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        persona.id,
-                        persona.name,
-                        persona.philosophy_family,
-                        persona.style,
-                        json.dumps(persona.core_values),
-                        json.dumps(persona.debate_rules),
-                        int(persona.is_builtin),
-                        int(persona.is_user_editable),
-                        int(persona.is_selectable),
-                        now,
-                        now,
-                    ),
-                )
+        for persona in personas:
+            existing = self._read_persona_by_id(persona.id)
+            timestamps = {
+                "created_at": existing["created_at"] if existing else utc_now(),
+                "updated_at": utc_now(),
+            }
+            self._write_persona_payload({**persona.model_dump(), **timestamps})
 
     def list_personas(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM personas ORDER BY is_builtin DESC, name ASC").fetchall()
-        return [self._persona_from_row(row) for row in rows]
+        personas = [self._read_persona_file(path) for path in self._iter_persona_files()]
+        return sorted(personas, key=lambda persona: (not persona["is_builtin"], persona["name"].lower()))
 
     def get_selectable_personas(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM personas WHERE is_selectable = 1 ORDER BY is_builtin DESC, name ASC"
-            ).fetchall()
-        return [self._persona_from_row(row) for row in rows]
+        return [persona for persona in self.list_personas() if persona["is_selectable"]]
 
     def create_persona(self, payload: PersonaCreate) -> dict[str, Any]:
         persona_id = uuid.uuid4().hex
         now = utc_now()
-        with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO personas (
-                    id, name, philosophy_family, style, core_values_json, debate_rules_json,
-                    is_builtin, is_user_editable, is_selectable, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
-                """,
-                (
-                    persona_id,
-                    payload.name,
-                    payload.philosophy_family,
-                    payload.style,
-                    json.dumps(payload.core_values),
-                    json.dumps(payload.debate_rules),
-                    int(payload.is_selectable),
-                    now,
-                    now,
-                ),
-            )
+        persona = {
+            "id": persona_id,
+            "name": payload.name,
+            "philosophy_family": payload.philosophy_family,
+            "style": payload.style,
+            "core_values": deepcopy(payload.core_values),
+            "debate_rules": deepcopy(payload.debate_rules),
+            "is_builtin": False,
+            "is_user_editable": True,
+            "is_selectable": payload.is_selectable,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._write_persona_payload(persona)
         return self.get_persona(persona_id)
 
     def get_persona(self, persona_id: str) -> dict[str, Any]:
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM personas WHERE id = ?", (persona_id,)).fetchone()
-        if row is None:
+        persona = self._read_persona_by_id(persona_id)
+        if persona is None:
             raise KeyError(f"Unknown persona: {persona_id}")
-        return self._persona_from_row(row)
+        return persona
 
     def update_persona(self, persona_id: str, payload: PersonaUpdate) -> dict[str, Any]:
         current = self.get_persona(persona_id)
@@ -222,25 +211,13 @@ class Storage:
                 payload.is_selectable if payload.is_selectable is not None else current["is_selectable"]
             ),
         }
-        with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE personas
-                SET name = ?, philosophy_family = ?, style = ?, core_values_json = ?,
-                    debate_rules_json = ?, is_selectable = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    merged["name"],
-                    merged["philosophy_family"],
-                    merged["style"],
-                    json.dumps(merged["core_values"]),
-                    json.dumps(merged["debate_rules"]),
-                    int(merged["is_selectable"]),
-                    utc_now(),
-                    persona_id,
-                ),
-            )
+        self._write_persona_payload(
+            {
+                **current,
+                **merged,
+                "updated_at": utc_now(),
+            }
+        )
         return self.get_persona(persona_id)
 
     def create_session(self, topic: str, agents: list[dict[str, Any]], judge: dict[str, Any]) -> dict[str, Any]:
@@ -307,6 +284,14 @@ class Storage:
                 """,
                 (session_id,),
             ).fetchall()
+            thread_entries = conn.execute(
+                """
+                SELECT * FROM thread_entries
+                WHERE session_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (session_id,),
+            ).fetchall()
             judge_score = conn.execute(
                 "SELECT * FROM judge_scores WHERE session_id = ?", (session_id,)
             ).fetchone()
@@ -328,6 +313,10 @@ class Storage:
         payload["messages"] = [
             {**self._message_from_row(row), "agent_name": agent_names.get(row["agent_id"], row["agent_id"])}
             for row in messages
+        ]
+        payload["thread_entries"] = [
+            {**self._thread_entry_from_row(row), "agent_name": agent_names.get(row["agent_id"], row["display_name"])}
+            for row in thread_entries
         ]
         payload["judge_score"] = self._judge_score_from_row(judge_score) if judge_score else None
         return payload
@@ -483,6 +472,57 @@ class Storage:
             "created_at": created_at,
         }
 
+    def add_thread_entry(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        display_name: str,
+        display_text: str,
+        round_type: str | None = None,
+        round_index: int | None = None,
+        agent_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+        entry_id: str | None = None,
+    ) -> dict[str, Any]:
+        thread_entry_id = entry_id or uuid.uuid4().hex
+        created_at = utc_now()
+        entry_payload = payload or {}
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO thread_entries (
+                    id, session_id, kind, display_name, display_text,
+                    round_type, round_index, agent_id, payload_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    thread_entry_id,
+                    session_id,
+                    kind,
+                    display_name,
+                    display_text,
+                    round_type,
+                    round_index,
+                    agent_id,
+                    json.dumps(entry_payload),
+                    created_at,
+                ),
+            )
+        return {
+            "id": thread_entry_id,
+            "session_id": session_id,
+            "kind": kind,
+            "display_name": display_name,
+            "display_text": display_text,
+            "round_type": round_type,
+            "round_index": round_index,
+            "agent_id": agent_id,
+            "payload": entry_payload,
+            "created_at": created_at,
+        }
+
     def add_judge_score(
         self,
         *,
@@ -528,8 +568,89 @@ class Storage:
                 (winner_agent_id, utc_now(), session_id),
             )
 
+    def delete_session(self, session_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown session: {session_id}")
+            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
     def export_session(self, session_id: str) -> dict[str, Any]:
         return self.get_session(session_id)
+
+    def _ensure_persona_store(self) -> None:
+        self._builtin_dir.mkdir(parents=True, exist_ok=True)
+        self._custom_dir.mkdir(parents=True, exist_ok=True)
+        source_dir = builtin_personas_dir(self._builtin_source_root)
+        if source_dir.resolve() == self._builtin_dir.resolve():
+            return
+        for source_path in sorted(source_dir.glob("*.json")):
+            target_path = self._builtin_dir / source_path.name
+            if target_path.exists():
+                continue
+            target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    def _migrate_personas_from_db(self) -> None:
+        with self._connect() as conn:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'personas'"
+                ).fetchone()
+                is None
+            ):
+                return
+            rows = conn.execute("SELECT * FROM personas ORDER BY is_builtin DESC, name ASC").fetchall()
+        for row in rows:
+            payload = self._persona_from_row(row)
+            if self._persona_path(payload["id"], payload["is_builtin"]).exists():
+                continue
+            self._write_persona_payload(payload)
+
+    def _iter_persona_files(self) -> list[Path]:
+        return [
+            *sorted(self._builtin_dir.glob("*.json")),
+            *sorted(self._custom_dir.glob("*.json")),
+        ]
+
+    def _persona_path(self, persona_id: str, is_builtin: bool) -> Path:
+        directory = self._builtin_dir if is_builtin else self._custom_dir
+        return directory / f"{persona_id}.json"
+
+    def _read_persona_by_id(self, persona_id: str) -> dict[str, Any] | None:
+        for is_builtin in (True, False):
+            path = self._persona_path(persona_id, is_builtin)
+            if path.exists():
+                return self._read_persona_file(path)
+        return None
+
+    def _read_persona_file(self, path: Path) -> dict[str, Any]:
+        payload = load_persona_payload(path)
+        file_timestamp = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC).isoformat()
+        payload.setdefault("is_builtin", path.parent == self._builtin_dir)
+        payload.setdefault("is_user_editable", not payload["is_builtin"])
+        payload.setdefault("is_selectable", True)
+        payload.setdefault("created_at", file_timestamp)
+        payload.setdefault("updated_at", payload["created_at"])
+        return payload
+
+    def _write_persona_payload(self, payload: dict[str, Any]) -> None:
+        persona_payload = {
+            "id": payload["id"],
+            "name": payload["name"],
+            "philosophy_family": payload["philosophy_family"],
+            "style": payload["style"],
+            "core_values": list(payload.get("core_values", [])),
+            "debate_rules": list(payload.get("debate_rules", [])),
+            "is_builtin": bool(payload.get("is_builtin", False)),
+            "is_user_editable": bool(payload.get("is_user_editable", not payload.get("is_builtin", False))),
+            "is_selectable": bool(payload.get("is_selectable", True)),
+            "created_at": payload.get("created_at", utc_now()),
+            "updated_at": payload.get("updated_at", utc_now()),
+        }
+        path = self._persona_path(persona_payload["id"], persona_payload["is_builtin"])
+        with self._lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(persona_payload, indent=2), encoding="utf-8")
 
     def _persona_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -598,6 +719,20 @@ class Storage:
             "rationale": row["rationale"],
             "criteria": json.loads(row["criteria_json"]),
             "raw_text": row["raw_text"],
+            "created_at": row["created_at"],
+        }
+
+    def _thread_entry_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "kind": row["kind"],
+            "display_name": row["display_name"],
+            "display_text": row["display_text"],
+            "round_type": row["round_type"],
+            "round_index": row["round_index"],
+            "agent_id": row["agent_id"],
+            "payload": json.loads(row["payload_json"]),
             "created_at": row["created_at"],
         }
 

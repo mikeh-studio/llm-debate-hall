@@ -6,15 +6,22 @@ import os
 import re
 import shutil
 import threading
+import uuid
 from typing import Any, Callable
 
 from llm_debate_hall.adapters.base import PRESET_REGISTRY, AdapterRequest, DebateAdapter
 from llm_debate_hall.adapters.mock_adapter import MockDebateAdapter
-from llm_debate_hall.adapters.subprocess_adapter import SubprocessDebateAdapter
+from llm_debate_hall.adapters.subprocess_adapter import (
+    SubprocessAdapterError,
+    SubprocessDebateAdapter,
+    cached_active_models,
+    probe_active_models,
+)
 from llm_debate_hall.events import EventBroker
 from llm_debate_hall.storage import Storage
 
 REPLY_ROUNDS_PER_CYCLE = 2
+PERSONA_SELECTION_STATUS = "selecting_personas"
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -30,6 +37,20 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 def _single_paragraph(text: str) -> str:
     cleaned = " ".join(part.strip() for part in text.replace("\r", "\n").splitlines() if part.strip())
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _required_json(raw_text: str, *, context: str, preset_id: str, model_name: str) -> dict[str, Any]:
+    payload = _extract_json(raw_text)
+    if payload is None:
+        raise RuntimeError(f"{context} returned invalid JSON for {preset_id}:{model_name}.")
+    return payload
+
+
+def active_models_for_preset(preset_id: str, env: dict[str, str] | None = None) -> list[str]:
+    preset = PRESET_REGISTRY.get(preset_id)
+    if preset is None:
+        return []
+    return probe_active_models(preset, env)
 
 
 def default_adapter_factory(agent: dict[str, Any]) -> DebateAdapter:
@@ -70,15 +91,27 @@ class DebateEngine:
         return self.storage.get_session(session_id)
 
     async def run_segment(self, session_id: str) -> None:
-        self.storage.update_session_status(session_id, "running")
-        await self.broker.publish(session_id, {"type": "status", "status": "running"})
         try:
             session = self.storage.get_session(session_id)
             selectable_personas = self.storage.get_selectable_personas()
             agents = [agent for agent in session["agents"] if agent["role"] == "debater"]
+            auto_agents = [agent for agent in agents if not agent.get("persona_id")]
 
-            await self._select_personas(session, agents, selectable_personas)
+            if auto_agents:
+                await self._set_session_status(session_id, PERSONA_SELECTION_STATUS)
+                entry = self.storage.add_thread_entry(
+                    session_id=session_id,
+                    kind="system",
+                    display_name="Debate Hall",
+                    display_text=self._persona_selection_text(auto_agents),
+                    payload={"event": "persona_selection_started"},
+                )
+                await self.broker.publish(session_id, {"type": "thread_entry_saved", "entry": entry})
+                await self._select_personas(session, agents, selectable_personas)
+                session = self.storage.get_session(session_id)
+                agents = [agent for agent in session["agents"] if agent["role"] == "debater"]
 
+            await self._set_session_status(session_id, "running")
             next_round_index = self._next_round_index(session)
             if not session["messages"]:
                 next_round_index = await self._play_round(
@@ -98,9 +131,16 @@ class DebateEngine:
                     round_index=next_round_index,
                 )
 
-            self.storage.update_session_status(session_id, "awaiting_continue")
-            await self.broker.publish(session_id, {"type": "status", "status": "awaiting_continue"})
+            await self._set_session_status(session_id, "awaiting_continue")
         except Exception as exc:
+            entry = self.storage.add_thread_entry(
+                session_id=session_id,
+                kind="system",
+                display_name="Debate Hall",
+                display_text=str(exc),
+                payload={"event": "session_failed"},
+            )
+            await self.broker.publish(session_id, {"type": "thread_entry_saved", "entry": entry})
             self.storage.update_session_status(session_id, "failed")
             await self.broker.publish(
                 session_id,
@@ -118,10 +158,20 @@ class DebateEngine:
         round_index: int,
     ) -> int:
         round_id = self.storage.create_round(session_id, round_index, round_type)
+        thread_entry = self.storage.add_thread_entry(
+            session_id=session_id,
+            kind="system",
+            display_name="Debate Hall",
+            display_text=f"Round {round_index} started: {round_type}.",
+            round_type=round_type,
+            round_index=round_index,
+            payload={"event": "round_started"},
+        )
         await self.broker.publish(
             session_id,
             {"type": "round_started", "round_type": round_type, "round_index": round_index},
         )
+        await self.broker.publish(session_id, {"type": "thread_entry_saved", "entry": thread_entry})
         for agent in agents:
             await self._run_turn(
                 session_id=session_id,
@@ -164,7 +214,12 @@ class DebateEngine:
                 env=agent["env"],
             )
             response = await adapter.generate(request, lambda chunk: self._noop(chunk))
-            payload = _extract_json(response.raw_text) or {}
+            payload = _required_json(
+                response.raw_text,
+                context=f"{agent['display_name']} persona selection",
+                preset_id=agent["preset_id"],
+                model_name=agent["model_name"],
+            )
             persona_id = payload.get("persona_id")
             if not any(persona["id"] == persona_id for persona in selectable_personas):
                 persona_id = selectable_personas[0]["id"]
@@ -198,6 +253,7 @@ class DebateEngine:
             if provider_session and provider_session["mode"] == "persistent" and provider_session["status"] == "active"
             else None
         )
+        thread_entry_id = uuid.uuid4().hex
 
         async def on_chunk(chunk: str) -> None:
             await self.broker.publish(
@@ -208,6 +264,19 @@ class DebateEngine:
                     "round_index": round_index,
                     "agent_id": agent["id"],
                     "agent_name": agent["display_name"],
+                    "chunk": chunk,
+                },
+            )
+            await self.broker.publish(
+                session_id,
+                {
+                    "type": "thread_entry_chunk",
+                    "entry_id": thread_entry_id,
+                    "kind": "agent",
+                    "display_name": agent["display_name"],
+                    "round_type": round_type,
+                    "round_index": round_index,
+                    "agent_id": agent["id"],
                     "chunk": chunk,
                 },
             )
@@ -265,6 +334,29 @@ class DebateEngine:
                         "provider_session": persisted_session,
                     },
                 )
+            except SubprocessAdapterError as exc:
+                if not exc.allow_stateless_fallback:
+                    raise
+                fallback_session = self.storage.upsert_provider_session(
+                    session_id=session_id,
+                    agent_id=agent["id"],
+                    preset_id=agent["preset_id"],
+                    provider_session_id=active_provider_session["provider_session_id"] if active_provider_session else None,
+                    mode="replay_fallback",
+                    status="fallback",
+                    last_error=str(exc),
+                )
+                await self.broker.publish(
+                    session_id,
+                    {
+                        "type": "provider_session_state",
+                        "agent_id": agent["id"],
+                        "agent_name": agent["display_name"],
+                        "provider_session": fallback_session,
+                    },
+                )
+                request.prompt = prompt
+                response = await adapter.generate(request, on_chunk)
             except Exception as exc:
                 fallback_session = self.storage.upsert_provider_session(
                     session_id=session_id,
@@ -301,10 +393,22 @@ class DebateEngine:
             normalized_payload=payload,
             stream_status=response.stream_status,
         )
+        thread_entry = self.storage.add_thread_entry(
+            session_id=session_id,
+            kind="agent",
+            display_name=agent["display_name"],
+            display_text=payload["display_text"],
+            round_type=round_type,
+            round_index=round_index,
+            agent_id=agent["id"],
+            payload=payload,
+            entry_id=thread_entry_id,
+        )
         await self.broker.publish(
             session_id,
             {"type": "message_saved", "message": {**message, "agent_name": agent["display_name"]}},
         )
+        await self.broker.publish(session_id, {"type": "thread_entry_saved", "entry": thread_entry})
 
     async def _judge_session(self, session_id: str, topic: str, judge: dict[str, Any]) -> None:
         session = self.storage.get_session(session_id)
@@ -327,7 +431,12 @@ class DebateEngine:
         )
         adapter = self.adapter_factory(judge)
         response = await adapter.generate(request, lambda chunk: self._noop(chunk))
-        payload = _extract_json(response.raw_text) or {}
+        payload = _required_json(
+            response.raw_text,
+            context=f"{judge['display_name']} judge decision",
+            preset_id=judge["preset_id"],
+            model_name=judge["model_name"],
+        )
         winner_agent_id = payload.get("winner_agent_id")
         if not any(agent["id"] == winner_agent_id for agent in candidates):
             winner_agent_id = candidates[0]["id"]
@@ -339,7 +448,19 @@ class DebateEngine:
             criteria=payload.get("criteria", {}),
             raw_text=response.raw_text,
         )
+        thread_entry = self.storage.add_thread_entry(
+            session_id=session_id,
+            kind="judge",
+            display_name=judge["display_name"],
+            display_text=score["rationale"],
+            payload={
+                "winner_agent_id": score["winner_agent_id"],
+                "criteria": score["criteria"],
+                "raw_text": response.raw_text,
+            },
+        )
         await self.broker.publish(session_id, {"type": "judge_result", "judge_score": score})
+        await self.broker.publish(session_id, {"type": "thread_entry_saved", "entry": thread_entry})
 
     def _build_persona_prompt(
         self, topic: str, agent: dict[str, Any], selectable_personas: list[dict[str, Any]]
@@ -359,8 +480,7 @@ class DebateEngine:
     def _build_turn_prompt(
         self, session: dict[str, Any], topic: str, agent: dict[str, Any], round_type: str
     ) -> str:
-        messages = session["messages"]
-        transcript = self._summarize_messages(messages)
+        transcript = self._summarize_messages(session)
         persona = next(
             persona for persona in self.storage.list_personas() if persona["id"] == agent["persona_id"]
         )
@@ -401,7 +521,7 @@ class DebateEngine:
             "opening": "State your position in exactly one concise paragraph.",
             "reply": "Respond to the chamber in exactly one concise paragraph.",
         }
-        updates = self._summarize_messages_since_last_turn(session["messages"], agent["id"])
+        updates = self._summarize_messages_since_last_turn(session, agent["id"])
         return (
             "You are continuing the same structured debate session.\n"
             f"TOPIC: {topic}\n"
@@ -419,7 +539,7 @@ class DebateEngine:
     def _build_judge_prompt(
         self, topic: str, session: dict[str, Any], candidates: list[dict[str, Any]]
     ) -> str:
-        transcript = self._summarize_messages(session["messages"], max_items=16)
+        transcript = self._summarize_messages(session, max_items=16)
         candidate_ids = ", ".join(agent["id"] for agent in candidates)
         return (
             "Judge the debate.\n"
@@ -431,56 +551,71 @@ class DebateEngine:
             'Return JSON: {"winner_agent_id":"...", "rationale":"...", "criteria":{...}}'
         )
 
-    def _summarize_messages(self, messages: list[dict[str, Any]], max_items: int = 10) -> str:
-        if not messages:
+    def _conversation_entries(self, session: dict[str, Any]) -> list[dict[str, Any]]:
+        thread_entries = [
+            entry
+            for entry in session.get("thread_entries", [])
+            if entry["kind"] in {"agent", "moderator"}
+        ]
+        if thread_entries:
+            return thread_entries
+        return [
+            {
+                "kind": "agent",
+                "round_type": item["round_type"],
+                "round_index": item["round_index"],
+                "agent_id": item["agent_id"],
+                "display_name": item.get("agent_name", item["agent_id"]),
+                "display_text": item["display_text"],
+            }
+            for item in session.get("messages", [])
+        ]
+
+    def _summarize_messages(self, session: dict[str, Any], max_items: int = 10) -> str:
+        entries = self._conversation_entries(session)
+        if not entries:
             return "No prior turns."
-        selected = messages[-max_items:]
+        selected = entries[-max_items:]
         lines = [
-            f"{item['round_type']} | {item.get('agent_name', item['agent_id'])} | {_single_paragraph(item['display_text'])}"
+            f"{item.get('round_type') or item['kind']} | {item.get('display_name', item.get('agent_name', item.get('agent_id', 'Moderator')))} | {_single_paragraph(item['display_text'])}"
             for item in selected
         ]
         return "\n".join(lines)
 
     def _summarize_messages_since_last_turn(
-        self, messages: list[dict[str, Any]], agent_id: str, max_items: int = 8
+        self, session: dict[str, Any], agent_id: str, max_items: int = 8
     ) -> str:
+        messages = self._conversation_entries(session)
         last_agent_index = -1
         for index, item in enumerate(messages):
-            if item["agent_id"] == agent_id:
+            if item.get("agent_id") == agent_id:
                 last_agent_index = index
         if last_agent_index == -1:
-            return self._summarize_messages(messages, max_items=max_items)
+            return self._summarize_messages(session, max_items=max_items)
         selected = messages[last_agent_index + 1 :][-max_items:]
         if not selected:
             return "No new chamber turns since your last response."
         lines = [
-            f"{item['round_type']} | {item.get('agent_name', item['agent_id'])} | {_single_paragraph(item['display_text'])}"
+            f"{item.get('round_type') or item['kind']} | {item.get('display_name', item.get('agent_name', item.get('agent_id', 'Moderator')))} | {_single_paragraph(item['display_text'])}"
             for item in selected
         ]
         return "\n".join(lines)
 
     def _normalize_turn_payload(self, raw_text: str, agent_name: str, round_type: str) -> dict[str, Any]:
         payload = _extract_json(raw_text)
-        if payload:
-            display = payload.get("display_text") or payload.get("claim") or raw_text
-            display = _single_paragraph(display)
-            return {
-                "display_text": display,
-                "claim": _single_paragraph(payload.get("claim", display)),
-                "reasoning": payload.get("reasoning", []),
-                "attack": _single_paragraph(payload.get("attack", "")),
-                "question": _single_paragraph(payload.get("question", "")),
-                "confidence": float(payload.get("confidence", 0.5)),
-                "raw_text": raw_text,
-            }
-        fallback = _single_paragraph(raw_text or f"{agent_name} produced no output during {round_type}.")
+        if not payload:
+            detail = _single_paragraph(raw_text)
+            suffix = f" {detail}" if detail else ""
+            raise RuntimeError(f"{agent_name} produced invalid turn output during {round_type}.{suffix}")
+        display = payload.get("display_text") or payload.get("claim") or raw_text
+        display = _single_paragraph(display)
         return {
-            "display_text": fallback,
-            "claim": fallback,
-            "reasoning": [],
-            "attack": "",
-            "question": "",
-            "confidence": 0.5,
+            "display_text": display,
+            "claim": _single_paragraph(payload.get("claim", display)),
+            "reasoning": payload.get("reasoning", []),
+            "attack": _single_paragraph(payload.get("attack", "")),
+            "question": _single_paragraph(payload.get("question", "")),
+            "confidence": float(payload.get("confidence", 0.5)),
             "raw_text": raw_text,
         }
 
@@ -488,6 +623,14 @@ class DebateEngine:
         if not session["rounds"]:
             return 1
         return max(round_item["round_index"] for round_item in session["rounds"]) + 1
+
+    def _persona_selection_text(self, auto_agents: list[dict[str, Any]]) -> str:
+        names = ", ".join(agent["display_name"] for agent in auto_agents)
+        return f"Selecting personas for {names} before opening statements."
+
+    async def _set_session_status(self, session_id: str, status: str) -> None:
+        self.storage.update_session_status(session_id, status)
+        await self.broker.publish(session_id, {"type": "status", "status": status})
 
     def _spawn(self, session_id: str, coroutine_factory: Callable[[], asyncio.Future | Any]) -> None:
         existing = self._threads.get(session_id)
@@ -513,5 +656,17 @@ def visible_presets() -> list[dict[str, Any]]:
         payload = preset.model_dump()
         payload["is_available"] = shutil.which(preset.command[0]) is not None
         payload["missing_env_vars"] = [name for name in preset.required_env_vars if not os.environ.get(name)]
+        validated_models = cached_active_models(preset) or []
+        payload["validated_models"] = validated_models
+        if validated_models:
+            payload["active_models"] = validated_models
+            payload["model_validation_mode"] = "validated"
+        elif preset.models and not preset.requires_command_override:
+            payload["active_models"] = list(preset.models)
+            payload["model_validation_mode"] = "fallback"
+        else:
+            payload["active_models"] = []
+            payload["model_validation_mode"] = "unavailable"
+        payload["default_model"] = payload["active_models"][0] if payload["active_models"] else None
         presets.append(payload)
     return presets

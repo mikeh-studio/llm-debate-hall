@@ -11,17 +11,17 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from llm_debate_hall.adapters.base import AdapterRequest, PRESET_REGISTRY
-from llm_debate_hall.engine import DebateEngine, visible_presets
+from llm_debate_hall.engine import DebateEngine, active_models_for_preset, visible_presets
 from llm_debate_hall.events import EventBroker
 from llm_debate_hall.models import (
     CreateSessionRequest,
     HumanVoteRequest,
     JudgeDecisionRequest,
+    ModeratorNoteRequest,
     PersonaCreate,
     PersonaUpdate,
     QuestionRequest,
 )
-from llm_debate_hall.personas import BUILTIN_PERSONAS
 from llm_debate_hall.storage import Storage
 
 
@@ -49,11 +49,60 @@ def _fallback_suggestions(seed: str) -> list[str]:
     ]
 
 
-def create_app(db_path: str | None = None) -> FastAPI:
+def _using_default_invocation(preset_id: str, command: list[str], args_template: list[str]) -> bool:
+    preset = PRESET_REGISTRY.get(preset_id)
+    if preset is None:
+        return False
+    return command == preset.command and args_template == preset.args_template
+
+
+def _assert_active_model(
+    *,
+    preset_id: str,
+    model_name: str,
+    command: list[str],
+    args_template: list[str],
+    env: dict[str, str],
+) -> None:
+    preset = PRESET_REGISTRY.get(preset_id)
+    if preset is None:
+        raise HTTPException(status_code=400, detail=f"Unknown preset: {preset_id}")
+    if preset.requires_command_override:
+        return
+    if not _using_default_invocation(preset_id, command, args_template):
+        return
+
+    active_models = active_models_for_preset(preset_id, env)
+    if active_models:
+        if model_name in active_models:
+            return
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model_name}' is not active for preset '{preset_id}'. "
+                f"Use one of: {', '.join(active_models)}."
+            ),
+        )
+    if model_name in preset.models:
+        return
+    if preset.models:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model_name}' is not configured for preset '{preset_id}'. "
+                f"Use one of: {', '.join(preset.models)}."
+            ),
+        )
+    raise HTTPException(status_code=400, detail=f"No models are configured for preset '{preset_id}'.")
+
+
+def create_app(db_path: str | None = None, personas_root: str | None = None) -> FastAPI:
     base_dir = Path(__file__).resolve().parent
     static_dir = base_dir / "static"
-    storage = Storage(db_path or str(base_dir.parent / "llm_debate_hall.db"))
-    storage.seed_personas(BUILTIN_PERSONAS)
+    storage = Storage(
+        db_path or str(base_dir.parent / "llm_debate_hall.db"),
+        personas_root_path=personas_root or str(base_dir / "personas"),
+    )
     broker = EventBroker()
     engine = DebateEngine(storage=storage, broker=broker)
 
@@ -108,6 +157,13 @@ def create_app(db_path: str | None = None) -> FastAPI:
             "args_template": payload.judge.args_template or judge_preset.args_template,
             "env": payload.judge.env,
         }
+        _assert_active_model(
+            preset_id=payload.judge.preset_id,
+            model_name=payload.judge.model_name,
+            command=judge_agent["command"],
+            args_template=judge_agent["args_template"],
+            env=judge_agent["env"],
+        )
         adapter = engine.adapter_factory(judge_agent)
         prompt = (
             "Decide whether this is a strong debate question.\n"
@@ -159,6 +215,13 @@ def create_app(db_path: str | None = None) -> FastAPI:
             "args_template": payload.judge.args_template or judge_preset.args_template,
             "env": payload.judge.env,
         }
+        _assert_active_model(
+            preset_id=payload.judge.preset_id,
+            model_name=payload.judge.model_name,
+            command=judge_agent["command"],
+            args_template=judge_agent["args_template"],
+            env=judge_agent["env"],
+        )
         adapter = engine.adapter_factory(judge_agent)
         prompt = (
             "Suggest exactly three debate questions.\n"
@@ -210,6 +273,14 @@ def create_app(db_path: str | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str) -> dict:
+        try:
+            storage.delete_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"ok": True}
+
     @app.post("/api/sessions")
     async def create_session(payload: CreateSessionRequest) -> dict:
         if len(payload.agents) < 2 or len(payload.agents) > 5:
@@ -219,6 +290,15 @@ def create_app(db_path: str | None = None) -> FastAPI:
             preset = PRESET_REGISTRY.get(agent.preset_id)
             if preset is None:
                 raise HTTPException(status_code=400, detail=f"Unknown preset: {agent.preset_id}")
+            command = agent.command or preset.command
+            args_template = agent.args_template or preset.args_template
+            _assert_active_model(
+                preset_id=agent.preset_id,
+                model_name=agent.model_name,
+                command=command,
+                args_template=args_template,
+                env=agent.env,
+            )
             agent_payloads.append(
                 {
                     "display_name": agent.display_name,
@@ -227,14 +307,23 @@ def create_app(db_path: str | None = None) -> FastAPI:
                     "persona_id": agent.persona_id if agent.persona_mode != "auto" else None,
                     "preset_id": agent.preset_id,
                     "model_name": agent.model_name,
-                    "command": agent.command or preset.command,
-                    "args_template": agent.args_template or preset.args_template,
+                    "command": command,
+                    "args_template": args_template,
                     "env": agent.env,
                 }
             )
         judge_preset = PRESET_REGISTRY.get(payload.judge.preset_id)
         if judge_preset is None:
             raise HTTPException(status_code=400, detail=f"Unknown preset: {payload.judge.preset_id}")
+        judge_command = payload.judge.command or judge_preset.command
+        judge_args_template = payload.judge.args_template or judge_preset.args_template
+        _assert_active_model(
+            preset_id=payload.judge.preset_id,
+            model_name=payload.judge.model_name,
+            command=judge_command,
+            args_template=judge_args_template,
+            env=payload.judge.env,
+        )
         session = storage.create_session(
             payload.topic,
             agent_payloads,
@@ -244,8 +333,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 "side": "judge",
                 "preset_id": payload.judge.preset_id,
                 "model_name": payload.judge.model_name,
-                "command": payload.judge.command or judge_preset.command,
-                "args_template": payload.judge.args_template or judge_preset.args_template,
+                "command": judge_command,
+                "args_template": judge_args_template,
                 "env": payload.judge.env,
             },
         )
@@ -271,6 +360,31 @@ def create_app(db_path: str | None = None) -> FastAPI:
         engine.continue_session(session_id)
         return {"ok": True}
 
+    @app.post("/api/sessions/{session_id}/moderator-note")
+    async def add_moderator_note(session_id: str, payload: ModeratorNoteRequest) -> dict:
+        try:
+            session = storage.get_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        note = payload.text.strip()
+        if not note:
+            raise HTTPException(status_code=400, detail="Moderator note cannot be empty.")
+        if session["status"] != "awaiting_continue":
+            raise HTTPException(
+                status_code=400,
+                detail="Moderator notes can only be sent while the session is waiting to continue.",
+            )
+        entry = storage.add_thread_entry(
+            session_id=session_id,
+            kind="moderator",
+            display_name="Moderator",
+            display_text=note,
+            payload={"source": "user"},
+        )
+        await broker.publish(session_id, {"type": "thread_entry_saved", "entry": entry})
+        engine.continue_session(session_id)
+        return {"ok": True, "entry": entry}
+
     @app.post("/api/sessions/{session_id}/end")
     async def end_session(session_id: str) -> dict:
         try:
@@ -294,6 +408,15 @@ def create_app(db_path: str | None = None) -> FastAPI:
         judge_preset = PRESET_REGISTRY.get(payload.judge.preset_id)
         if judge_preset is None:
             raise HTTPException(status_code=400, detail=f"Unknown preset: {payload.judge.preset_id}")
+        judge_command = payload.judge.command or judge_preset.command
+        judge_args_template = payload.judge.args_template or judge_preset.args_template
+        _assert_active_model(
+            preset_id=payload.judge.preset_id,
+            model_name=payload.judge.model_name,
+            command=judge_command,
+            args_template=judge_args_template,
+            env=payload.judge.env,
+        )
         decision = await engine.decide_winner(
             session_id,
             {
@@ -303,8 +426,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 "side": "judge",
                 "preset_id": payload.judge.preset_id,
                 "model_name": payload.judge.model_name,
-                "command": payload.judge.command or judge_preset.command,
-                "args_template": payload.judge.args_template or judge_preset.args_template,
+                "command": judge_command,
+                "args_template": judge_args_template,
                 "env": payload.judge.env,
             },
         )

@@ -7,3 +7,4 @@ llm_debate_hall.db
 .env
 *.log
 progress.md
+.gstack/
