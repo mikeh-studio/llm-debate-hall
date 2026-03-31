@@ -61,6 +61,22 @@ PYTHONPYCACHEPREFIX=/tmp/llm-debate-hall-pyc python3 -m compileall llm_debate_ha
 For UI or orchestration changes, also test the live app in the browser at `http://127.0.0.1:8000`.
 When validating debate startup, confirm the Arena shows the persona-selection phase or the transcript itself instead of staying blank after `Start Debate`.
 
+## Live Debate Smoke Skill
+
+This repo now includes a repo-local Codex skill at `.codex/skills/live-debate-smoke/SKILL.md`.
+Its runner executes a real 3-debater smoke test on the fixed AGI deployment topic, prefers a single validated real provider/model across all three seats before trying mixed lineups, keeps iterating until it gets a valid debate result or hits a concrete blocker, and writes local Markdown evidence under `artifacts/live-debate-smoke/`.
+
+```bash
+python3 scripts/run_live_debate_smoke.py
+```
+
+The smoke workflow was added alongside two runtime fixes that matter for real-provider debates:
+
+- longer generation timeouts for slow live turns, configurable with `LLM_DEBATE_HALL_GENERATION_TIMEOUT_SECONDS`
+- process-group cleanup on timeout so orphaned provider subprocesses do not linger after a failed turn
+
+The runner requires at least one validated real provider from the built-in `openai`, `anthropic`, or `ollama` presets. It will not fall back to `mock`, and its generated reports/screenshots are intended as local evidence rather than committed source.
+
 ## Project Layout
 
 - `llm_debate_hall/` FastAPI app, debate engine, storage, adapters

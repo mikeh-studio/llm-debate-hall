@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -51,7 +52,7 @@ AUTH_ERROR_MARKERS = (
 PROBE_PROMPT = "Reply with the single word OK."
 PROBE_TIMEOUT_SECONDS = 20
 PROBE_CACHE_TTL_SECONDS = 300
-GENERATION_TIMEOUT_SECONDS = 45
+GENERATION_TIMEOUT_SECONDS = int(os.environ.get("LLM_DEBATE_HALL_GENERATION_TIMEOUT_SECONDS", "180"))
 _PROBE_CACHE: dict[str, tuple[float, list[str]]] = {}
 _PROBE_CACHE_LOCK = threading.Lock()
 
@@ -448,6 +449,7 @@ class SubprocessDebateAdapter(DebateAdapter):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_merged_env(request.env),
+            start_new_session=True,
         )
 
         stdin_bytes = plan.stdin_text.encode("utf-8") if plan.stdin_text is not None else None
@@ -498,6 +500,7 @@ class SubprocessDebateAdapter(DebateAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=_merged_env(request.env),
+                start_new_session=True,
             )
             stdout, stderr = await self._communicate_with_timeout(process, request)
             raw_stdout = stdout.decode("utf-8", errors="replace").strip()
@@ -540,6 +543,7 @@ class SubprocessDebateAdapter(DebateAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=_merged_env(request.env),
+                start_new_session=True,
             )
             stdout, stderr = await self._communicate_with_timeout(process, request)
             raw_stdout = stdout.decode("utf-8", errors="replace").strip()
@@ -576,6 +580,7 @@ class SubprocessDebateAdapter(DebateAdapter):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_merged_env(request.env),
+            start_new_session=True,
         )
         stdout, stderr = await self._communicate_with_timeout(process, request)
         raw_stdout = stdout.decode("utf-8", errors="replace").strip()
@@ -604,7 +609,16 @@ class SubprocessDebateAdapter(DebateAdapter):
         try:
             return await asyncio.wait_for(process.communicate(stdin_bytes), timeout=GENERATION_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as exc:
-            process.kill()
+            pid = getattr(process, "pid", None)
+            if pid is not None:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    process.kill()
+                except PermissionError:
+                    process.kill()
+            else:
+                process.kill()
             try:
                 await process.communicate()
             except Exception:
