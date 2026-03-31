@@ -8,3 +8,5 @@ llm_debate_hall.db
 *.log
 progress.md
 .gstack/
+artifacts/live-debate-smoke/
+artifacts/.DS_Store
