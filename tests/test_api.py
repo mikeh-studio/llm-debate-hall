@@ -61,6 +61,16 @@ def test_presets_include_active_model_metadata(tmp_path: Path, monkeypatch) -> N
     assert gemini["active_models"] == []
 
 
+def test_health_endpoints_return_ok(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    for path in ("/healthz", "/api/health"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", "app": "llm-debate-hall"}
+
+
 def test_question_validation_and_suggestions(tmp_path: Path) -> None:
     app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
     client = TestClient(app)
@@ -351,3 +361,64 @@ def test_presets_expose_fallback_models_even_when_cli_is_unavailable(tmp_path: P
     assert payload["is_available"] is False
     assert payload["active_models"] == ["sonnet", "opus"]
     assert payload["default_model"] == "sonnet"
+
+
+def test_api_can_reset_one_debater_provider_session(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+    storage = app.state.storage
+
+    session = client.post(
+        "/api/sessions",
+        json={
+            "topic": "Should teams recover a stuck debater session?",
+            "agents": [
+                {"display_name": "Athena", "preset_id": "mock", "model_name": "mock-model"},
+                {"display_name": "Burke", "preset_id": "mock", "model_name": "mock-model"},
+            ],
+            "judge": {"display_name": "Solon", "preset_id": "mock", "model_name": "mock-model"},
+        },
+    ).json()
+
+    debater = next(agent for agent in client.get(f"/api/sessions/{session['id']}").json()["agents"] if agent["role"] == "debater")
+    storage.upsert_provider_session(
+        session_id=session["id"],
+        agent_id=debater["id"],
+        preset_id="anthropic",
+        provider_session_id="claude-session-1",
+        mode="persistent",
+        status="active",
+        last_error=None,
+    )
+
+    response = client.post(f"/api/sessions/{session['id']}/agents/{debater['id']}/reset-session")
+
+    assert response.status_code == 200
+    payload = response.json()
+    updated_debater = next(agent for agent in payload["agents"] if agent["id"] == debater["id"])
+    assert updated_debater["provider_session"] is None
+    assert any("Next turn will start fresh" in entry["display_text"] for entry in payload["thread_entries"])
+
+
+def test_api_rejects_judge_provider_session_reset(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    session = client.post(
+        "/api/sessions",
+        json={
+            "topic": "Should judges stay stateless?",
+            "agents": [
+                {"display_name": "Athena", "preset_id": "mock", "model_name": "mock-model"},
+                {"display_name": "Burke", "preset_id": "mock", "model_name": "mock-model"},
+            ],
+            "judge": {"display_name": "Solon", "preset_id": "mock", "model_name": "mock-model"},
+        },
+    ).json()
+
+    judge = next(agent for agent in client.get(f"/api/sessions/{session['id']}").json()["agents"] if agent["role"] == "judge")
+
+    response = client.post(f"/api/sessions/{session['id']}/agents/{judge['id']}/reset-session")
+
+    assert response.status_code == 400
+    assert "Only debater sessions can be reset" in response.text

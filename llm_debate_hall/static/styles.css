@@ -625,11 +625,38 @@ textarea {
   gap: 16px;
 }
 
+.seat-popover .seat-setup[hidden],
+.seat-popover .judge-config[hidden] {
+  display: none;
+}
+
 .seat-popover .judge-config {
   border-top: none;
   padding-top: 0;
   display: grid;
   gap: 12px;
+}
+
+.provider-session-panel {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-input);
+  background: color-mix(in srgb, var(--surface-deep) 50%, transparent);
+}
+
+.provider-session-panel p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.provider-session-panel .provider-session-error {
+  color: var(--verdict);
+}
+
+.provider-session-panel.fallback {
+  border-color: color-mix(in srgb, var(--verdict) 26%, transparent);
 }
 
 /* ─── Arena / Debate Mockup ─── */
@@ -691,10 +718,246 @@ textarea {
   font-size: 0.95rem;
 }
 
+.arena-presentation-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 24px 0;
+}
+
+.arena-presentation-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.arena-presentation-badge,
+.pixel-stage-kicker {
+  font-family: var(--font-ui);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.arena-presentation-note,
+.pixel-stage-caption,
+.stage-actor-label span {
+  color: var(--muted);
+}
+
+.arena-presentation-toggle {
+  display: inline-flex;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-btn);
+  background: var(--surface);
+}
+
+.arena-presentation-toggle button {
+  background: transparent;
+  box-shadow: none;
+}
+
+.arena-presentation-toggle button.is-active {
+  background: var(--surface-deep);
+  box-shadow: var(--shadow);
+}
+
 .debate-thread {
   padding: 24px;
   display: grid;
   gap: 16px;
+}
+
+.pixel-stage-shell[hidden] {
+  display: none;
+}
+
+.pixel-stage-shell {
+  display: grid;
+  gap: 10px;
+}
+
+.pixel-stage-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pixel-stage {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  gap: 16px;
+  min-height: 260px;
+  padding: 20px 18px 18px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-card);
+  background:
+    radial-gradient(circle at top, color-mix(in srgb, var(--accent) 12%, transparent), transparent 48%),
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-deep) 86%, black 4%), color-mix(in srgb, var(--bg) 92%, black 8%));
+  box-shadow: inset 0 -30px 48px rgba(0, 0, 0, 0.08);
+}
+
+.pixel-stage-backdrop {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.05), transparent 32%),
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 18px,
+      rgba(255, 255, 255, 0.03) 18px 20px
+    );
+  pointer-events: none;
+}
+
+.pixel-stage-actors {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: space-evenly;
+  align-items: flex-end;
+  gap: 14px;
+  min-height: 190px;
+  flex-wrap: wrap;
+}
+
+.pixel-stage-floor {
+  position: relative;
+  z-index: 1;
+  height: 18px;
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 20%, transparent), transparent),
+    linear-gradient(90deg, color-mix(in srgb, var(--surface-deep) 90%, black 12%), color-mix(in srgb, var(--surface) 85%, white 2%));
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.08);
+}
+
+.pixel-stage-empty {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  min-height: 190px;
+  text-align: center;
+  gap: 8px;
+}
+
+.pixel-stage-empty p {
+  margin: 0;
+}
+
+.stage-actor {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  min-width: 92px;
+  transform: translateY(var(--actor-drop));
+}
+
+.stage-actor.is-active-speaker {
+  z-index: 2;
+}
+
+.stage-actor.is-thinking .pixel-sprite-frame {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--rule));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 10%, transparent), var(--shadow);
+}
+
+.pixel-sprite-frame {
+  display: grid;
+  place-items: center;
+  width: 72px;
+  height: 72px;
+  padding: 8px;
+  border: 1px solid var(--rule);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 92%, white 3%), color-mix(in srgb, var(--surface-deep) 92%, black 4%));
+  box-shadow: var(--shadow);
+}
+
+.stage-actor.judge .pixel-sprite-frame {
+  width: 80px;
+  height: 80px;
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--rule));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-deep) 92%, white 4%), color-mix(in srgb, var(--surface) 86%, black 6%));
+}
+
+.pixel-sprite {
+  width: 48px;
+  height: 48px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.stage-actor.judge .pixel-sprite {
+  width: 54px;
+  height: 54px;
+}
+
+.stage-actor-label {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  text-align: center;
+}
+
+.stage-actor-label strong {
+  font-family: var(--font-ui);
+  font-size: 0.92rem;
+}
+
+.stage-actor-label span {
+  font-size: 0.82rem;
+}
+
+.pixel-bubble {
+  position: relative;
+  max-width: min(220px, 44vw);
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface) 94%, white 4%);
+  box-shadow: var(--shadow);
+  font-family: var(--font-body);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.pixel-bubble::after {
+  content: "";
+  position: absolute;
+  left: calc(50% - 8px);
+  bottom: -9px;
+  width: 16px;
+  height: 16px;
+  background: inherit;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  transform: rotate(45deg);
+  opacity: 0.2;
+}
+
+.pixel-bubble.judge {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--rule));
+  background: color-mix(in srgb, var(--surface-deep) 90%, white 4%);
+}
+
+.pixel-bubble.is-live {
+  border-style: dashed;
+}
+
+.pixel-bubble.is-thinking .thinking-dots {
+  justify-content: center;
+  min-width: 42px;
 }
 
 .arena-composer-shell {
@@ -759,7 +1022,33 @@ textarea {
     gap: 10px;
   }
 
+  .arena-presentation-bar,
+  .pixel-stage-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .arena-presentation-toggle {
+    width: 100%;
+  }
+
+  .arena-presentation-toggle button {
+    flex: 1 1 0;
+  }
+
   .debate-header-title {
     white-space: normal;
+  }
+
+  .pixel-stage {
+    min-height: 320px;
+  }
+
+  .pixel-stage-actors {
+    justify-content: center;
+  }
+
+  .pixel-bubble {
+    max-width: min(250px, 80vw);
   }
 }

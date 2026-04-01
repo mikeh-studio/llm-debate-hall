@@ -3,10 +3,12 @@ import asyncio
 import llm_debate_hall.adapters.subprocess_adapter as subprocess_adapter
 from llm_debate_hall.adapters.base import AdapterRequest, PRESET_REGISTRY
 from llm_debate_hall.adapters.subprocess_adapter import (
+    ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS,
     InvocationPlan,
     SubprocessDebateAdapter,
     SubprocessAdapterError,
     _PROBE_CACHE,
+    _timeout_seconds_for_request,
     _validate_success_output,
     build_claude_persistent_command,
     build_codex_exec_command,
@@ -218,5 +220,62 @@ def test_generate_times_out_and_kills_subprocess(monkeypatch) -> None:
         assert "openai:gpt-5" in str(exc)
     else:
         raise AssertionError("Expected the hanging subprocess to time out.")
+
+    assert process.killed is True
+
+
+def test_anthropic_persistent_timeout_uses_extended_timeout(monkeypatch) -> None:
+    request = make_request(
+        preset_id="anthropic",
+        command=["claude"],
+        model_name="sonnet",
+    )
+
+    monkeypatch.setattr(subprocess_adapter, "ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS", 300)
+
+    assert _timeout_seconds_for_request(request, persistent=True) == 300
+
+
+def test_anthropic_persistent_timeout_allows_stateless_fallback(monkeypatch) -> None:
+    class HangingProcess:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.killed = False
+            self.pid = None
+
+        async def communicate(self, stdin=None):
+            await asyncio.sleep(0.05)
+            return b"", b""
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = HangingProcess()
+    adapter = SubprocessDebateAdapter()
+
+    async def on_chunk(_chunk: str) -> None:
+        return None
+
+    monkeypatch.setattr(subprocess_adapter, "ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS", 0.01)
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(subprocess_adapter.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    try:
+        asyncio.run(
+            adapter.generate_persistent(
+                make_request(preset_id="anthropic", command=["claude"], model_name="sonnet"),
+                "claude-session-1",
+                on_chunk,
+            )
+        )
+    except SubprocessAdapterError as exc:
+        assert exc.allow_stateless_fallback is True
+        assert "anthropic:sonnet" in str(exc)
+        assert "resuming a persistent provider session" in str(exc)
+    else:
+        raise AssertionError("Expected anthropic persistent timeout to allow stateless fallback.")
 
     assert process.killed is True

@@ -53,6 +53,9 @@ PROBE_PROMPT = "Reply with the single word OK."
 PROBE_TIMEOUT_SECONDS = 20
 PROBE_CACHE_TTL_SECONDS = 300
 GENERATION_TIMEOUT_SECONDS = int(os.environ.get("LLM_DEBATE_HALL_GENERATION_TIMEOUT_SECONDS", "180"))
+ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS = int(
+    os.environ.get("LLM_DEBATE_HALL_ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS", "300")
+)
 _PROBE_CACHE: dict[str, tuple[float, list[str]]] = {}
 _PROBE_CACHE_LOCK = threading.Lock()
 
@@ -149,11 +152,18 @@ def _build_malformed_output_error(request: AdapterRequest, raw_text: str) -> str
     )
 
 
-def _build_timeout_error(request: AdapterRequest) -> str:
+def _timeout_seconds_for_request(request: AdapterRequest, *, persistent: bool = False) -> int:
+    if persistent and request.preset_id == "anthropic":
+        return ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS
+    return GENERATION_TIMEOUT_SECONDS
+
+
+def _build_timeout_error(request: AdapterRequest, timeout_seconds: int, context: str | None = None) -> str:
     phase = request.output_mode.replace("_", " ")
+    suffix = f" {context}" if context else ""
     return (
         f"{request.agent_name} timed out during {phase} using "
-        f"{request.preset_id}:{request.model_name} after {GENERATION_TIMEOUT_SECONDS} seconds."
+        f"{request.preset_id}:{request.model_name} after {timeout_seconds} seconds{suffix}."
     )
 
 
@@ -582,7 +592,18 @@ class SubprocessDebateAdapter(DebateAdapter):
             env=_merged_env(request.env),
             start_new_session=True,
         )
-        stdout, stderr = await self._communicate_with_timeout(process, request)
+        timeout_context = (
+            "while resuming a persistent provider session"
+            if provider_session_id
+            else "while starting a persistent provider session"
+        )
+        stdout, stderr = await self._communicate_with_timeout(
+            process,
+            request,
+            timeout_seconds=_timeout_seconds_for_request(request, persistent=True),
+            timeout_context=timeout_context,
+            allow_stateless_fallback=True,
+        )
         raw_stdout = stdout.decode("utf-8", errors="replace").strip()
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
         if process.returncode != 0:
@@ -605,9 +626,13 @@ class SubprocessDebateAdapter(DebateAdapter):
         process: asyncio.subprocess.Process,
         request: AdapterRequest,
         stdin_bytes: bytes | None = None,
+        timeout_seconds: int | None = None,
+        timeout_context: str | None = None,
+        allow_stateless_fallback: bool = False,
     ) -> tuple[bytes, bytes]:
+        active_timeout_seconds = timeout_seconds or _timeout_seconds_for_request(request)
         try:
-            return await asyncio.wait_for(process.communicate(stdin_bytes), timeout=GENERATION_TIMEOUT_SECONDS)
+            return await asyncio.wait_for(process.communicate(stdin_bytes), timeout=active_timeout_seconds)
         except asyncio.TimeoutError as exc:
             pid = getattr(process, "pid", None)
             if pid is not None:
@@ -623,4 +648,7 @@ class SubprocessDebateAdapter(DebateAdapter):
                 await process.communicate()
             except Exception:
                 pass
-            raise SubprocessAdapterError(_build_timeout_error(request)) from exc
+            raise SubprocessAdapterError(
+                _build_timeout_error(request, active_timeout_seconds, timeout_context),
+                allow_stateless_fallback=allow_stateless_fallback,
+            ) from exc

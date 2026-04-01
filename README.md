@@ -2,19 +2,22 @@
 
 ![LLM Debate Hall header](llm_debate_hall/static/llm-debate-hall-header_2.png)
 
-LLM Debate Hall is a for-fun, work-in-progress project for running a circle of local AI debaters. One inspiration for this project was the multi-agent council concept seen in Karpathy's `llm-council`, though this repo takes it in a different, more debate- and game-oriented direction. The current experiment is simple: give multiple agent CLIs a topic, let each one act as a chosen philosopher or persona, and see how the debate unfolds. The broader idea is larger than debate alone; the circle could expand into other multi-agent interactions over time.
+LLM Debate Hall is a local-first FastAPI app for running structured multi-agent debates with real model CLIs, persistent transcripts, and persona-driven debaters. Give several agents a question, cast each one as a distinct philosophy or style, and watch the debate unfold as one continuous Arena thread instead of a pile of disconnected model outputs.
 
-## Status
+It is built for a very specific kind of experiment: using the local tools you already trust, keeping the debate state on your machine, and making the whole exchange inspectable enough to replay, judge, and test. The result sits somewhere between an AI toy, a debate simulator, and a local developer tool for probing how different model backends reason under pressure.
 
-- Local-first and experimental
-- Built around local CLIs such as Codex, Claude, and Ollama
-- Not polished for hosted deployment
-- Best treated as a playground, not a production tool
+## Why It Stands Out
 
-## What Works Today
+- Local-first by default: provider CLIs, auth, storage, and transcripts stay on your machine
+- Structured debates instead of raw chat panes: opening rounds, replies, pause/continue flow, and judging
+- Persona-driven seats: each debater can argue from a distinct philosophical frame or operational style
+- Transcript-first design: debates are persisted, recoverable, and inspectable after the live run
+- Real-provider smoke testing: the repo can now validate a full 3-debater live debate path end to end
+
+## What It Can Do
 
 - Arena-style setup for 2 to 5 debaters plus a judge
-- Philosopher/persona selection per seat
+- Per-seat model, provider, and persona configuration
 - Visible auto-persona selection before opening statements
 - Single-paragraph turn flow with pause/continue controls
 - Transcript-first Arena updates with persisted session recovery
@@ -26,13 +29,19 @@ The judge is stateless and evaluates from the stored transcript. Supported provi
 
 ## Current UI
 
-### Setup Screen
+### Setup
 
 The setup screen lets you configure a topic, 2 to 5 debaters, per-seat personas, and the judge before the chamber starts.
 
 ![Setup screen](llm_debate_hall/static/setup_page.png)
 
-### Personas And Dark Mode
+### Pixel Stage Arena
+
+The Arena now includes an alternate Pixel Stage presentation mode that keeps the full transcript as the source of truth while rendering the current speakers as retro RPG-style sprites with a live speech bubble.
+
+![Pixel Stage Arena](llm_debate_hall/static/arena.png)
+
+### Personas And Arena Theme
 
 Personas remain editable in the app, and the Arena supports a dark theme for longer debate sessions.
 
@@ -50,7 +59,9 @@ uvicorn llm_debate_hall.main:app --reload
 
 Open `http://127.0.0.1:8000`.
 
-## Development Checks
+## Validation
+
+The lightweight local validation set is:
 
 ```bash
 pytest -q
@@ -61,16 +72,17 @@ PYTHONPYCACHEPREFIX=/tmp/llm-debate-hall-pyc python3 -m compileall llm_debate_ha
 For UI or orchestration changes, also test the live app in the browser at `http://127.0.0.1:8000`.
 When validating debate startup, confirm the Arena shows the persona-selection phase or the transcript itself instead of staying blank after `Start Debate`.
 
-## Live Debate Smoke Skill
+## Live Debate Smoke Test
 
-This repo now includes a repo-local Codex skill at `.codex/skills/live-debate-smoke/SKILL.md`.
-Its runner executes a real 3-debater smoke test on the fixed AGI deployment topic, prefers a single validated real provider/model across all three seats before trying mixed lineups, keeps iterating until it gets a valid debate result or hits a concrete blocker, and writes local Markdown evidence under `artifacts/live-debate-smoke/`.
+This repo now includes a repo-local Codex skill at `.codex/skills/live-debate-smoke/SKILL.md` plus a runner script that executes a real 3-debater smoke test on a fixed AGI safety topic. The smoke test is meant to answer one question quickly: does the end-to-end live debate path still work with real providers, real turns, and real persisted transcript output?
+
+The runner prefers a single validated real provider/model across all three seats before trying mixed lineups, keeps iterating until it gets a valid debate result or hits a concrete blocker, and writes local Markdown evidence under `artifacts/live-debate-smoke/`.
 
 ```bash
 python3 scripts/run_live_debate_smoke.py
 ```
 
-The smoke workflow was added alongside two runtime fixes that matter for real-provider debates:
+The smoke workflow shipped alongside two runtime fixes that matter for real-provider debates:
 
 - longer generation timeouts for slow live turns, configurable with `LLM_DEBATE_HALL_GENERATION_TIMEOUT_SECONDS`
 - process-group cleanup on timeout so orphaned provider subprocesses do not linger after a failed turn
@@ -83,9 +95,16 @@ The runner requires at least one validated real provider from the built-in `open
 - `llm_debate_hall/static/` arena UI
 - `tests/` API, engine, storage, and adapter tests
 
+## Status
+
+- Local-first and experimental
+- Built around local CLIs such as Codex, Claude, and Ollama
+- Strongest on single-machine use, not hosted deployment
+- Best treated as a serious prototype rather than a polished SaaS product
+
 ## Local-Only Constraints
 
-This project is mainly meant to run on your machine. It depends on locally installed CLIs, local auth state or env vars, and subprocess execution. A remote deployment is possible, but only if the target host also has the required provider tooling installed and authenticated.
+This project is mainly meant to run on your machine. It depends on locally installed CLIs, local auth state or env vars, and subprocess execution. Real-provider debates require the same provider tooling to be installed and authenticated wherever the app runs.
 
 ## Contributing
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import llm_debate_hall.engine as engine_module
 from llm_debate_hall.adapters.base import AdapterResponse, PersistentAdapterResponse
+from llm_debate_hall.adapters.subprocess_adapter import SubprocessAdapterError
 from llm_debate_hall.engine import DebateEngine
 from llm_debate_hall.events import EventBroker
 from llm_debate_hall.storage import Storage
@@ -109,6 +110,70 @@ class SlowPersonaAdapter:
         return AdapterResponse(raw_text=raw_text, stream_status="simulated")
 
 
+class ConcurrentPersonaAdapter:
+    def __init__(self) -> None:
+        self.active_persona_calls = 0
+        self.max_concurrent_persona_calls = 0
+
+    def supports_persistent_sessions(self, request) -> bool:
+        return False
+
+    async def generate(self, request, on_chunk) -> AdapterResponse:
+        if request.output_mode == "persona":
+            self.active_persona_calls += 1
+            self.max_concurrent_persona_calls = max(
+                self.max_concurrent_persona_calls,
+                self.active_persona_calls,
+            )
+            try:
+                await asyncio.sleep(0.05)
+            finally:
+                self.active_persona_calls -= 1
+            persona_id = "stoic_rationalist" if request.agent_name.lower().startswith("a") else "pragmatic_engineer"
+            return AdapterResponse(
+                raw_text=json.dumps({"persona_id": persona_id, "justification": "Selected concurrently."}),
+                stream_status="simulated",
+            )
+
+        raw_text = json.dumps(
+            {
+                "display_text": f"{request.agent_name} {request.output_mode} response",
+                "claim": "claim",
+                "reasoning": [],
+                "attack": "",
+                "question": "",
+                "confidence": 0.5,
+            }
+        )
+        await on_chunk("response")
+        return AdapterResponse(raw_text=raw_text, stream_status="simulated")
+
+
+class PersistentFallbackAdapter:
+    def supports_persistent_sessions(self, request) -> bool:
+        return request.role == "debater"
+
+    async def generate(self, request, on_chunk) -> AdapterResponse:
+        raw_text = json.dumps(
+            {
+                "display_text": f"{request.agent_name} stateless {request.output_mode}",
+                "claim": "stateless",
+                "reasoning": [],
+                "attack": "",
+                "question": "",
+                "confidence": 0.6,
+            }
+        )
+        await on_chunk("stateless")
+        return AdapterResponse(raw_text=raw_text, stream_status="simulated")
+
+    async def generate_persistent(self, request, provider_session_id, on_chunk) -> PersistentAdapterResponse:
+        raise SubprocessAdapterError(
+            f"{request.agent_name} timed out during {request.output_mode} using {request.preset_id}:{request.model_name} after 300 seconds while resuming a persistent provider session.",
+            allow_stateless_fallback=True,
+        )
+
+
 def test_engine_runs_segment_then_pauses(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
     broker = EventBroker()
@@ -167,6 +232,24 @@ def test_engine_runs_segment_then_pauses(tmp_path: Path) -> None:
     assert len(continued["rounds"]) == 5
 
 
+def test_visible_presets_can_expose_mock_backend_for_hosted_demo(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_DEBATE_HALL_ENABLE_MOCK_PRESET", "true")
+    monkeypatch.setattr(engine_module.shutil, "which", lambda _: None)
+    monkeypatch.setattr(
+        engine_module,
+        "cached_active_models",
+        lambda preset, env=None: ["gpt-5"] if preset.id == "openai" else [],
+    )
+
+    presets = engine_module.visible_presets()
+
+    mock = next(preset for preset in presets if preset["id"] == "mock")
+    assert mock["is_available"] is True
+    assert mock["active_models"] == ["mock-model"]
+    assert mock["default_model"] == "mock-model"
+    assert mock["model_validation_mode"] == "mock_enabled"
+
+
 def test_engine_reuses_persistent_debater_sessions(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
     broker = EventBroker()
@@ -219,6 +302,61 @@ def test_engine_reuses_persistent_debater_sessions(tmp_path: Path) -> None:
     assert len(adapter.resumed_sessions) == 4
     assert all(agent["provider_session"]["mode"] == "persistent" for agent in debaters)
     assert all(agent["provider_session"]["status"] == "active" for agent in debaters)
+
+
+def test_engine_falls_back_to_stateless_after_persistent_timeout(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
+    broker = EventBroker()
+    adapter = PersistentFallbackAdapter()
+    engine = DebateEngine(storage=storage, broker=broker, adapter_factory=lambda agent: adapter)
+
+    session = storage.create_session(
+        "Should provider sessions recover after a timeout?",
+        [
+            {
+                "display_name": "Athena",
+                "role": "debater",
+                "side": "independent",
+                "persona_id": "stoic_rationalist",
+                "preset_id": "anthropic",
+                "model_name": "sonnet",
+                "command": ["claude"],
+                "args_template": [],
+                "env": {},
+            },
+            {
+                "display_name": "Burke",
+                "role": "debater",
+                "side": "independent",
+                "persona_id": "pragmatic_engineer",
+                "preset_id": "anthropic",
+                "model_name": "sonnet",
+                "command": ["claude"],
+                "args_template": [],
+                "env": {},
+            },
+        ],
+        {
+            "display_name": "Solon",
+            "role": "judge",
+            "side": "judge",
+            "preset_id": "mock",
+            "model_name": "mock-judge",
+            "command": ["mock"],
+            "args_template": [],
+            "env": {},
+        },
+    )
+
+    asyncio.run(engine.run_segment(session["id"]))
+    result = storage.get_session(session["id"])
+    debaters = [agent for agent in result["agents"] if agent["role"] == "debater"]
+
+    assert result["status"] == "awaiting_continue"
+    assert len(result["messages"]) == 6
+    assert all(agent["provider_session"]["mode"] == "replay_fallback" for agent in debaters)
+    assert all(agent["provider_session"]["status"] == "fallback" for agent in debaters)
+    assert all("persistent provider session" in agent["provider_session"]["last_error"] for agent in debaters)
 
 
 def test_engine_exposes_selecting_personas_phase_before_rounds(tmp_path: Path) -> None:
@@ -284,6 +422,53 @@ def test_engine_exposes_selecting_personas_phase_before_rounds(tmp_path: Path) -
     assert saw_thread_entry is True
     assert payload["status"] == "awaiting_continue"
     assert len(payload["messages"]) == 6
+
+
+def test_engine_selects_personas_concurrently(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
+    broker = EventBroker()
+    adapter = ConcurrentPersonaAdapter()
+    engine = DebateEngine(storage=storage, broker=broker, adapter_factory=lambda agent: adapter)
+
+    session = storage.create_session(
+        "Should agents get a faster startup path?",
+        [
+            {
+                "display_name": "Athena",
+                "role": "debater",
+                "side": "independent",
+                "preset_id": "mock",
+                "model_name": "mock-model",
+                "command": ["mock"],
+                "args_template": [],
+                "env": {},
+            },
+            {
+                "display_name": "Burke",
+                "role": "debater",
+                "side": "independent",
+                "preset_id": "mock",
+                "model_name": "mock-model",
+                "command": ["mock"],
+                "args_template": [],
+                "env": {},
+            },
+        ],
+        {
+            "display_name": "Solon",
+            "role": "judge",
+            "side": "judge",
+            "preset_id": "mock",
+            "model_name": "mock-judge",
+            "command": ["mock"],
+            "args_template": [],
+            "env": {},
+        },
+    )
+
+    asyncio.run(engine.run_segment(session["id"]))
+
+    assert adapter.max_concurrent_persona_calls >= 2
 
 
 def test_engine_summary_includes_moderator_thread_entries(tmp_path: Path) -> None:

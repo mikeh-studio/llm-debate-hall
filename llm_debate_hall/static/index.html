@@ -117,7 +117,25 @@
             Configure debaters in Setup, then start the debate.
           </p>
 
+          <div class="arena-presentation-bar">
+            <div class="arena-presentation-copy">
+              <span class="arena-presentation-badge">Presentation</span>
+              <span class="arena-presentation-note">Switch between the default chamber view and a retro stage.</span>
+            </div>
+            <div class="arena-presentation-toggle" id="arena-presentation-toggle" role="group" aria-label="Arena presentation mode">
+              <button type="button" data-presentation-mode="classic" aria-pressed="true">Classic</button>
+              <button type="button" data-presentation-mode="pixel-stage" aria-pressed="false">Pixel Stage</button>
+            </div>
+          </div>
+
           <div class="debate-thread">
+            <section class="pixel-stage-shell" id="pixel-stage-shell" hidden aria-label="Pixel Stage presentation">
+              <div class="pixel-stage-header">
+                <span class="pixel-stage-kicker">Pixel Stage</span>
+                <span class="pixel-stage-caption">Live speaker bubble above the canonical transcript.</span>
+              </div>
+              <div class="pixel-stage" id="pixel-stage"></div>
+            </section>
             <div class="thread-view" id="thread-view"></div>
             <div class="quick-actions" id="quick-actions"></div>
           </div>

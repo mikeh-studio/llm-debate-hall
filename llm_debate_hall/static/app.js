@@ -1,6 +1,15 @@
 const SAMPLE_NAMES = ["Athena", "Burke", "Cassius", "Diotima", "Erasmus"];
 const SAMPLE_PRESETS = ["openai", "anthropic", "openai", "anthropic", "ollama"];
+const DEFAULT_PERSONA_IDS = [
+  "stoic_rationalist",
+  "pragmatic_engineer",
+  "humanist_mediator",
+  "skeptical_historian",
+  "utilitarian_analyst",
+  "nietzschean_iconoclast",
+];
 const DRAFT_STORAGE_KEY = "llm-debate-hall:draft:v1";
+const ARENA_PRESENTATION_STORAGE_KEY = "llm-debate-hall:arena-presentation:v1";
 const SESSION_SYNC_TIMEOUT_MS = 8000;
 const SESSION_SYNC_INTERVAL_MS = 250;
 
@@ -20,6 +29,9 @@ const state = {
   arenaFeedback: "",
   arenaFeedbackKind: "",
   startInFlight: false,
+  popoverMode: null,
+  popoverSeatId: null,
+  presentationMode: "classic",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -66,6 +78,32 @@ function parseCsv(value) {
     .filter(Boolean);
 }
 
+function selectablePersonas() {
+  return state.personas.filter((persona) => persona.is_selectable);
+}
+
+function defaultPersonaChoiceForSeat(index = 0) {
+  const selectable = selectablePersonas();
+  if (!selectable.length) return "auto";
+
+  const preferredId = DEFAULT_PERSONA_IDS[index % DEFAULT_PERSONA_IDS.length];
+  if (selectable.some((persona) => persona.id === preferredId)) return preferredId;
+  return selectable[index % selectable.length]?.id || selectable[0]?.id || "auto";
+}
+
+function readArenaPresentationMode() {
+  try {
+    const saved = window.localStorage.getItem(ARENA_PRESENTATION_STORAGE_KEY);
+    return saved === "pixel-stage" ? "pixel-stage" : "classic";
+  } catch {
+    return "classic";
+  }
+}
+
+function persistArenaPresentationMode() {
+  window.localStorage.setItem(ARENA_PRESENTATION_STORAGE_KEY, state.presentationMode);
+}
+
 function readDraft() {
   try {
     const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY);
@@ -101,7 +139,7 @@ function restoreDraft() {
       display_name: seat.display_name || SAMPLE_NAMES[index] || `Debater ${index + 1}`,
       preset_id: seat.preset_id || defaultSeatPresetId(index),
       model_name: normalizedModelForPreset(seat.preset_id || defaultSeatPresetId(index), seat.model_name || ""),
-      persona_choice: seat.persona_choice || "auto",
+      persona_choice: seat.persona_choice || defaultPersonaChoiceForSeat(index),
       command: seat.command || "",
       args_template: seat.args_template || "",
       env_json: seat.env_json || "",
@@ -126,8 +164,7 @@ function setArenaFeedback(message = "", kind = "") {
 
 function personaOptions(selectedValue = "auto") {
   const options = [`<option value="auto" ${selectedValue === "auto" ? "selected" : ""}>Auto pick</option>`];
-  state.personas
-    .filter((persona) => persona.is_selectable)
+  selectablePersonas()
     .forEach((persona) => {
       options.push(
         `<option value="${escapeHtml(persona.id)}" ${persona.id === selectedValue ? "selected" : ""}>
@@ -230,7 +267,7 @@ function buildSeatConfig(index = 0) {
     display_name: SAMPLE_NAMES[index] || `Debater ${index + 1}`,
     preset_id: presetId,
     model_name: defaultModelForPreset(presetId),
-    persona_choice: "auto",
+    persona_choice: defaultPersonaChoiceForSeat(index),
     command: "",
     args_template: "",
     env_json: "",
@@ -306,12 +343,18 @@ function renderParticipantStrip() {
   const judge = currentJudge();
   const participants = [
     ...currentDebaters().map(
-      (seat) => `
+      (seat) => {
+        const sessionStatusNote =
+          seat.provider_session?.status === "fallback" || seat.provider_session?.last_error
+            ? " · reset session available"
+            : "";
+        return `
         <div class="participant-chip debater" data-seat-id="${escapeHtml(seat.id)}" role="button" tabindex="0">
           <strong>${escapeHtml(seat.display_name)}</strong>
-          <span>${escapeHtml(seat.model_name || "No model")} · ${escapeHtml(personaLabel(seat.persona_id))}</span>
+          <span>${escapeHtml((seat.model_name || "No model") + " · " + personaLabel(seat.persona_id) + sessionStatusNote)}</span>
         </div>
-      `
+      `;
+      }
     ),
     `
       <div class="participant-chip judge" data-role="judge" role="button" tabindex="0">
@@ -400,6 +443,58 @@ function threadEntriesForRender() {
   return entries;
 }
 
+function activeRoundForPendingSpeaker() {
+  if (!state.activeSession?.rounds?.length) return null;
+  return [...state.activeSession.rounds]
+    .sort((a, b) => b.round_index - a.round_index)
+    .find((round) => !round.completed_at) || null;
+}
+
+function buildPredictedDebaterPendingEntry() {
+  if (!state.activeSession || state.activeSession.status !== "running") return null;
+  const activeRound = activeRoundForPendingSpeaker();
+  if (!activeRound) return null;
+
+  const spokenAgentIds = new Set(
+    state.threadEntries
+      .filter((entry) => entry.kind === "agent" && entry.round_index === activeRound.round_index && entry.agent_id)
+      .map((entry) => entry.agent_id)
+  );
+  const nextDebater = currentDebaters().find((agent) => agent.id && !spokenAgentIds.has(agent.id));
+  if (!nextDebater) return null;
+
+  return {
+    id: `predicted-${activeRound.round_type}-${activeRound.round_index}-${nextDebater.id}`,
+    kind: "agent",
+    display_name: nextDebater.display_name,
+    display_text: "",
+    round_type: activeRound.round_type,
+    round_index: activeRound.round_index,
+    agent_id: nextDebater.id,
+    payload: { local: true, predicted: true },
+    created_at: new Date().toISOString(),
+    pending: true,
+  };
+}
+
+function syncPredictedPendingEntry() {
+  if (state.pendingThreadEntry && !state.pendingThreadEntry.payload?.predicted) {
+    return;
+  }
+
+  const predicted = buildPredictedDebaterPendingEntry();
+  if (predicted) {
+    if (!state.pendingThreadEntry || state.pendingThreadEntry.id !== predicted.id) {
+      state.pendingThreadEntry = predicted;
+    }
+    return;
+  }
+
+  if (state.pendingThreadEntry?.payload?.predicted) {
+    state.pendingThreadEntry = null;
+  }
+}
+
 function threadEntryRoleLabel(entry) {
   if (entry.kind === "moderator") return "Moderator";
   if (entry.kind === "judge") return "Judge";
@@ -407,7 +502,16 @@ function threadEntryRoleLabel(entry) {
   return entry.round_type || "Debater";
 }
 
+function thinkingDotsMarkup(label = "Waiting for response") {
+  return `
+    <div class="thinking-dots" aria-label="${escapeHtml(label)}">
+      <span></span><span></span><span></span>
+    </div>
+  `;
+}
+
 function renderThread() {
+  syncPredictedPendingEntry();
   const thread = $("thread-view");
   const entries = threadEntriesForRender();
   if (!entries.length) {
@@ -432,12 +536,135 @@ function renderThread() {
             </div>
             <div class="thread-entry-role">${escapeHtml(entry.round_type || entry.kind)}</div>
           </div>
-          <div class="thread-entry-body">${entry.display_text ? escapeHtml(entry.display_text) : '<div class="thinking-dots"><span></span><span></span><span></span></div>'}</div>
+          <div class="thread-entry-body">${entry.display_text ? escapeHtml(entry.display_text) : thinkingDotsMarkup(`${entry.display_name || "Speaker"} is thinking`)}</div>
         </article>
       `
     )
     .join("");
   thread.scrollTop = thread.scrollHeight;
+}
+
+function truncateStageBubble(text, limit = 148) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "...";
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, limit - 1).trimEnd()}…`;
+}
+
+function activeStageSpeakerEntry() {
+  if (state.pendingThreadEntry && ["agent", "judge"].includes(state.pendingThreadEntry.kind)) {
+    return state.pendingThreadEntry;
+  }
+  return [...state.threadEntries].reverse().find((entry) => ["agent", "judge"].includes(entry.kind)) || null;
+}
+
+function spriteForActor(actor, index = 0) {
+  if (actor.role === "judge") {
+    return "/static/assets/sprites/judge-archivist.svg";
+  }
+  const variants = [
+    "/static/assets/sprites/debater-sage.svg",
+    "/static/assets/sprites/debater-ember.svg",
+    "/static/assets/sprites/debater-ink.svg",
+  ];
+  return variants[index % variants.length] || "/static/assets/sprites/debater-fallback.svg";
+}
+
+function isStageSpeaker(actor, entry) {
+  if (!entry) return false;
+  if (actor.role === "judge") return entry.kind === "judge";
+  if (entry.kind !== "agent") return false;
+  if (entry.agent_id && actor.id) return entry.agent_id === actor.id;
+  return entry.display_name === actor.display_name;
+}
+
+function renderArenaPresentation() {
+  syncPredictedPendingEntry();
+  const toggle = $("arena-presentation-toggle");
+  if (toggle) {
+    toggle.querySelectorAll("[data-presentation-mode]").forEach((button) => {
+      const active = button.dataset.presentationMode === state.presentationMode;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+  }
+  renderPixelStage();
+}
+
+function renderPixelStage() {
+  const shell = $("pixel-stage-shell");
+  const stage = $("pixel-stage");
+  if (!shell || !stage) return;
+
+  if (state.presentationMode !== "pixel-stage") {
+    shell.hidden = true;
+    stage.innerHTML = "";
+    return;
+  }
+
+  shell.hidden = false;
+  if (!state.activeSession) {
+    stage.innerHTML = `
+      <div class="pixel-stage-empty">
+        <strong>No debate in the chamber</strong>
+        <p>Start a debate to see the council enter the Pixel Stage.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const debaters = currentDebaters().map((actor, index) => ({ ...actor, role: "debater", spriteIndex: index }));
+  const judge = { ...currentJudge(), role: "judge", spriteIndex: debaters.length };
+  const actors = [...debaters, judge];
+  const activeEntry = activeStageSpeakerEntry();
+
+  stage.innerHTML = `
+    <div class="pixel-stage-backdrop" aria-hidden="true"></div>
+    <div class="pixel-stage-actors">
+      ${actors
+        .map((actor, index) => {
+          const active = isStageSpeaker(actor, activeEntry);
+          const waitingForText = active && activeEntry?.pending && !String(activeEntry?.display_text || "").trim();
+          const bubbleContent = waitingForText
+            ? thinkingDotsMarkup(`${actor.display_name} is thinking`)
+            : escapeHtml(truncateStageBubble(activeEntry?.display_text || ""));
+          const roleLabel = actor.role === "judge" ? "Judge" : personaLabel(actor.persona_id);
+          return `
+            <article
+              class="stage-actor ${escapeHtml(actor.role)} ${active ? "is-active-speaker" : ""} ${waitingForText ? "is-thinking" : ""}"
+              style="--actor-drop:${index % 2 === 0 ? 0 : 8}px"
+              aria-label="${escapeHtml(`${actor.display_name}, ${actor.role}`)}"
+            >
+              ${
+                active
+                  ? `
+                <div
+                  class="pixel-bubble ${escapeHtml(actor.role)} ${activeEntry?.pending ? "is-live" : ""} ${waitingForText ? "is-thinking" : ""}"
+                  aria-live="polite"
+                >
+                  ${bubbleContent}
+                </div>
+              `
+                  : ""
+              }
+              <div class="pixel-sprite-frame">
+                <img
+                  class="pixel-sprite"
+                  src="${escapeHtml(spriteForActor(actor, actor.spriteIndex))}"
+                  alt="${escapeHtml(`${actor.display_name} sprite`)}"
+                />
+              </div>
+              <div class="stage-actor-label">
+                <strong>${escapeHtml(actor.display_name)}</strong>
+                <span>${escapeHtml(roleLabel)}</span>
+              </div>
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+    <div class="pixel-stage-floor" aria-hidden="true"></div>
+  `;
 }
 
 function renderQuickActions() {
@@ -515,8 +742,39 @@ function renderSeatSetup() {
   const container = $("seat-setup");
   const locked = Boolean(state.activeSession);
   container.innerHTML = state.seatConfigs
-    .map(
-      (seat, index) => `
+    .map((seat, index) => {
+      const liveAgent = state.activeSession?.agents.find((agent) => agent.id === seat.id) || null;
+      const providerSession = liveAgent?.provider_session || null;
+      const providerSessionNotice = providerSession
+        ? `
+          <div class="provider-session-panel ${escapeHtml(providerSession.status || "")}">
+            <strong>Native session</strong>
+            <p>Status: ${escapeHtml(providerSession.status || "unknown")}</p>
+            <p>Mode: ${escapeHtml(providerSession.mode || "unknown")}</p>
+            ${
+              providerSession.last_error
+                ? `<p class="provider-session-error">${escapeHtml(providerSession.last_error)}</p>`
+                : ""
+            }
+            <button
+              data-action="reset-provider-session"
+              data-agent-id="${escapeHtml(seat.id)}"
+              ${liveAgent?.role !== "debater" ? "disabled" : ""}
+            >
+              Reset Debater Session
+            </button>
+          </div>
+        `
+        : locked
+          ? `
+          <div class="provider-session-panel empty">
+            <strong>Native session</strong>
+            <p>No stored provider session for this debater. The next turn already starts fresh.</p>
+            <button data-action="reset-provider-session" data-agent-id="${escapeHtml(seat.id)}">Reset Debater Session</button>
+          </div>
+        `
+          : "";
+      return `
         <article class="seat-card" data-seat-id="${escapeHtml(seat.id)}">
           <div class="seat-card-head">
             <div class="seat-card-index">Seat ${index + 1}</div>
@@ -554,34 +812,48 @@ function renderSeatSetup() {
               <textarea data-field="env_json" rows="2" ${locked ? "disabled" : ""}>${escapeHtml(seat.env_json)}</textarea>
             </label>
           </details>
+          ${providerSessionNotice}
         </article>
-      `
-    )
+      `;
+    })
     .join("");
   $("add-seat").disabled = locked || state.seatConfigs.length >= 5;
 }
 
 function openSeatPopover(seatId) {
-  renderSeatSetup();
-  const container = $("seat-setup");
-  container.querySelectorAll(".seat-card").forEach((card) => {
-    card.hidden = card.dataset.seatId !== seatId;
-  });
-  container.hidden = false;
-  $("judge-config-container").hidden = true;
+  state.popoverMode = "debater";
+  state.popoverSeatId = seatId;
+  syncPopoverMode();
   $("popover-title").textContent = "Edit Debater";
   $("seat-popover").hidden = false;
 }
 
 function openJudgePopover() {
-  $("seat-setup").hidden = true;
-  $("judge-config-container").hidden = false;
+  state.popoverMode = "judge";
+  state.popoverSeatId = null;
+  syncPopoverMode();
   $("popover-title").textContent = "Edit Judge";
   $("seat-popover").hidden = false;
 }
 
 function closePopover() {
+  state.popoverMode = null;
+  state.popoverSeatId = null;
   $("seat-popover").hidden = true;
+}
+
+function syncPopoverMode() {
+  const seatSetup = $("seat-setup");
+  const judgeConfig = $("judge-config-container");
+  const showingDebater = state.popoverMode === "debater";
+  const showingJudge = state.popoverMode === "judge";
+
+  seatSetup.hidden = !showingDebater;
+  judgeConfig.hidden = !showingJudge;
+
+  seatSetup.querySelectorAll(".seat-card").forEach((card) => {
+    card.hidden = !showingDebater || card.dataset.seatId !== state.popoverSeatId;
+  });
 }
 
 function renderSettingsDrawer() {
@@ -590,6 +862,7 @@ function renderSettingsDrawer() {
   ["judge-name", "judge-preset", "judge-command", "judge-args", "judge-env"].forEach((id) => {
     $(id).disabled = Boolean(state.activeSession);
   });
+  syncPopoverMode();
 }
 
 function renderArena() {
@@ -598,6 +871,7 @@ function renderArena() {
   renderParticipantStrip();
   renderArenaFeedback();
   renderSuggestionList();
+  renderArenaPresentation();
   renderThread();
   renderQuickActions();
   renderComposer();
@@ -751,6 +1025,7 @@ function queueThreadChunk(event) {
     };
   }
   state.pendingThreadEntry.display_text += event.chunk;
+  renderArenaPresentation();
   renderThread();
 }
 
@@ -787,6 +1062,7 @@ async function connectSocket(sessionId) {
         const agent = state.activeSession.agents.find((item) => item.id === event.agent_id);
         if (agent) agent.persona_id = event.persona_id;
         renderParticipantStrip();
+        renderArenaPresentation();
         return;
       }
 
@@ -796,10 +1072,19 @@ async function connectSocket(sessionId) {
       }
 
       if (event.type === "thread_entry_saved") {
-        if (state.pendingThreadEntry?.id === event.entry.id) {
+        if (
+          state.pendingThreadEntry?.id === event.entry.id ||
+          (
+            state.pendingThreadEntry?.payload?.predicted &&
+            state.pendingThreadEntry.kind === event.entry.kind &&
+            state.pendingThreadEntry.agent_id === event.entry.agent_id &&
+            state.pendingThreadEntry.round_index === event.entry.round_index
+          )
+        ) {
           state.pendingThreadEntry = null;
         }
         upsertThreadEntry(event.entry);
+        renderArenaPresentation();
         renderThread();
         return;
       }
@@ -925,7 +1210,15 @@ async function validateQuestionOnly(question) {
 async function startDebate() {
   if (state.startInFlight) return;
   state.startInFlight = true;
+  const previousView = state.activeView;
+  const hadActiveSession = Boolean(state.activeSessionId);
   setArenaFeedback("Opening the chamber...", "success");
+  if (!hadActiveSession) {
+    state.threadEntries = [];
+    state.pendingThreadEntry = null;
+    pushLocalSystemEntry("Opening the chamber. The council is taking the stage...");
+  }
+  setView("arena");
   renderArena();
   try {
     validateSeatConfig();
@@ -956,7 +1249,11 @@ async function startDebate() {
       body: JSON.stringify(payload),
     });
     await loadSession(session.id);
+    setArenaFeedback("Summoning the debaters into the hall...", "success");
+    renderArena();
     await fetchJson(`/api/sessions/${session.id}/start`, { method: "POST" });
+    setArenaFeedback("Waiting for opening statements...", "success");
+    renderArena();
     const liveSession = await syncSessionUntil(
       session.id,
       (currentSession) =>
@@ -977,6 +1274,11 @@ async function startDebate() {
     await refreshSessions();
   } catch (error) {
     console.error(error);
+    if (!state.activeSessionId) {
+      state.threadEntries = [];
+      state.pendingThreadEntry = null;
+      setView(previousView);
+    }
     setArenaFeedback(error.message || "Start Debate failed.", "error");
     renderArena();
   } finally {
@@ -1052,6 +1354,7 @@ async function judgePickWinner() {
     payload: {},
     created_at: new Date().toISOString(),
   };
+  renderArenaPresentation();
   renderThread();
   const session = await fetchJson(`/api/sessions/${state.activeSession.id}/judge-decision`, {
     method: "POST",
@@ -1066,6 +1369,24 @@ async function judgePickWinner() {
 async function judgeNow() {
   await endDebate();
   await judgePickWinner();
+}
+
+async function resetDebaterSession(agentId) {
+  const session = await fetchJson(`/api/sessions/${state.activeSession.id}/agents/${agentId}/reset-session`, {
+    method: "POST",
+  });
+  state.activeSession = session;
+  syncThreadEntriesFromSession(session);
+  const agent = session.agents.find((item) => item.id === agentId);
+  if (agent) {
+    setArenaFeedback(
+      session.status === "failed"
+        ? `${agent.display_name} was reset. Use Reuse Settings from Sessions to start a fresh chamber.`
+        : `${agent.display_name} was reset. The next turn will start with a fresh provider session.`,
+      "success"
+    );
+  }
+  renderArena();
 }
 
 async function savePersona() {
@@ -1176,6 +1497,12 @@ function registerSeatListeners() {
   });
 
   $("seat-setup").addEventListener("click", (event) => {
+    if (event.target.dataset.action === "reset-provider-session") {
+      const agentId = event.target.dataset.agentId;
+      if (!state.activeSession || !agentId) return;
+      resetDebaterSession(agentId).catch(alert);
+      return;
+    }
     if (state.activeSession) return;
     if (event.target.dataset.action !== "remove-seat") return;
     const card = event.target.closest("[data-seat-id]");
@@ -1225,6 +1552,14 @@ function registerArenaListeners() {
       renderArenaHeader();
       renderArenaFeedback();
     }
+  });
+
+  $("arena-presentation-toggle").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-presentation-mode]");
+    if (!button) return;
+    state.presentationMode = button.dataset.presentationMode === "pixel-stage" ? "pixel-stage" : "classic";
+    persistArenaPresentationMode();
+    renderArenaPresentation();
   });
 }
 
@@ -1321,6 +1656,7 @@ async function boot() {
   $("judge-preset").value = defaultJudgePresetId;
 
   await loadPersonas();
+  state.presentationMode = readArenaPresentationMode();
   initializeSeatConfigs();
   restoreDraft();
   renderArena();
