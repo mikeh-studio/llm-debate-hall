@@ -401,6 +401,14 @@ class Storage:
             row = conn.execute("SELECT * FROM provider_sessions WHERE id = ?", (row_id,)).fetchone()
         return self._provider_session_from_row(row)
 
+    def reset_provider_session(self, agent_id: str) -> bool:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT id FROM provider_sessions WHERE agent_id = ?", (agent_id,)).fetchone()
+            if row is None:
+                return False
+            conn.execute("DELETE FROM provider_sessions WHERE agent_id = ?", (agent_id,))
+        return True
+
     def create_round(self, session_id: str, round_index: int, round_type: str) -> str:
         round_id = uuid.uuid4().hex
         with self._lock, self._connect() as conn:

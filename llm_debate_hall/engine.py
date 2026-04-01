@@ -24,6 +24,14 @@ REPLY_ROUNDS_PER_CYCLE = 2
 PERSONA_SELECTION_STATUS = "selecting_personas"
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _mock_preset_enabled() -> bool:
+    return _env_flag("LLM_DEBATE_HALL_ENABLE_MOCK_PRESET")
+
+
 def _extract_json(text: str) -> dict[str, Any] | None:
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
@@ -193,36 +201,18 @@ class DebateEngine:
         agents: list[dict[str, Any]],
         selectable_personas: list[dict[str, Any]],
     ) -> None:
-        for agent in agents:
-            if agent.get("persona_id"):
-                continue
-            adapter = self.adapter_factory(agent)
-            prompt = self._build_persona_prompt(session["topic"], agent, selectable_personas)
-            request = AdapterRequest(
-                session_id=session["id"],
-                agent_id=agent["id"],
-                agent_name=agent["display_name"],
-                preset_id=agent["preset_id"],
-                role=agent["role"],
-                side=agent["side"],
-                topic=session["topic"],
-                prompt=prompt,
-                output_mode="persona",
-                model_name=agent["model_name"],
-                command=agent["command"],
-                args_template=agent["args_template"],
-                env=agent["env"],
-            )
-            response = await adapter.generate(request, lambda chunk: self._noop(chunk))
-            payload = _required_json(
-                response.raw_text,
-                context=f"{agent['display_name']} persona selection",
-                preset_id=agent["preset_id"],
-                model_name=agent["model_name"],
-            )
-            persona_id = payload.get("persona_id")
-            if not any(persona["id"] == persona_id for persona in selectable_personas):
-                persona_id = selectable_personas[0]["id"]
+        auto_agents = [agent for agent in agents if not agent.get("persona_id")]
+        if not auto_agents:
+            return
+
+        results = await asyncio.gather(
+            *[
+                self._select_persona_for_agent(session, agent, selectable_personas)
+                for agent in auto_agents
+            ]
+        )
+
+        for agent, persona_id, justification in results:
             self.storage.update_agent_persona(agent["id"], persona_id)
             agent["persona_id"] = persona_id
             await self.broker.publish(
@@ -232,9 +222,44 @@ class DebateEngine:
                     "agent_id": agent["id"],
                     "agent_name": agent["display_name"],
                     "persona_id": persona_id,
-                    "justification": payload.get("justification", ""),
+                    "justification": justification,
                 },
             )
+
+    async def _select_persona_for_agent(
+        self,
+        session: dict[str, Any],
+        agent: dict[str, Any],
+        selectable_personas: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], str, str]:
+        adapter = self.adapter_factory(agent)
+        prompt = self._build_persona_prompt(session["topic"], agent, selectable_personas)
+        request = AdapterRequest(
+            session_id=session["id"],
+            agent_id=agent["id"],
+            agent_name=agent["display_name"],
+            preset_id=agent["preset_id"],
+            role=agent["role"],
+            side=agent["side"],
+            topic=session["topic"],
+            prompt=prompt,
+            output_mode="persona",
+            model_name=agent["model_name"],
+            command=agent["command"],
+            args_template=agent["args_template"],
+            env=agent["env"],
+        )
+        response = await adapter.generate(request, lambda chunk: self._noop(chunk))
+        payload = _required_json(
+            response.raw_text,
+            context=f"{agent['display_name']} persona selection",
+            preset_id=agent["preset_id"],
+            model_name=agent["model_name"],
+        )
+        persona_id = payload.get("persona_id")
+        if not any(persona["id"] == persona_id for persona in selectable_personas):
+            persona_id = selectable_personas[0]["id"]
+        return agent, persona_id, payload.get("justification", "")
 
     async def _run_turn(
         self,
@@ -651,16 +676,17 @@ class DebateEngine:
 def visible_presets() -> list[dict[str, Any]]:
     presets: list[dict[str, Any]] = []
     for preset in PRESET_REGISTRY.values():
-        if preset.hidden:
+        mock_enabled = preset.id == "mock" and _mock_preset_enabled()
+        if preset.hidden and not mock_enabled:
             continue
         payload = preset.model_dump()
-        payload["is_available"] = shutil.which(preset.command[0]) is not None
+        payload["is_available"] = mock_enabled or shutil.which(preset.command[0]) is not None
         payload["missing_env_vars"] = [name for name in preset.required_env_vars if not os.environ.get(name)]
-        validated_models = cached_active_models(preset) or []
+        validated_models = list(preset.models) if mock_enabled else cached_active_models(preset) or []
         payload["validated_models"] = validated_models
         if validated_models:
             payload["active_models"] = validated_models
-            payload["model_validation_mode"] = "validated"
+            payload["model_validation_mode"] = "mock_enabled" if mock_enabled else "validated"
         elif preset.models and not preset.requires_command_override:
             payload["active_models"] = list(preset.models)
             payload["model_validation_mode"] = "fallback"

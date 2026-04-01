@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 
@@ -99,9 +100,11 @@ def _assert_active_model(
 def create_app(db_path: str | None = None, personas_root: str | None = None) -> FastAPI:
     base_dir = Path(__file__).resolve().parent
     static_dir = base_dir / "static"
+    resolved_db_path = db_path or os.environ.get("LLM_DEBATE_HALL_DB_PATH") or str(base_dir.parent / "llm_debate_hall.db")
+    resolved_personas_root = personas_root or os.environ.get("LLM_DEBATE_HALL_PERSONAS_ROOT") or str(base_dir / "personas")
     storage = Storage(
-        db_path or str(base_dir.parent / "llm_debate_hall.db"),
-        personas_root_path=personas_root or str(base_dir / "personas"),
+        resolved_db_path,
+        personas_root_path=resolved_personas_root,
     )
     broker = EventBroker()
     engine = DebateEngine(storage=storage, broker=broker)
@@ -124,6 +127,14 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
     @app.get("/")
     async def index() -> FileResponse:
         return FileResponse(static_dir / "index.html")
+
+    @app.get("/healthz")
+    async def healthz() -> dict:
+        return {"status": "ok", "app": "llm-debate-hall"}
+
+    @app.get("/api/health")
+    async def api_health() -> dict:
+        return {"status": "ok", "app": "llm-debate-hall"}
 
     @app.get("/api/presets")
     async def list_presets() -> list[dict]:
@@ -359,6 +370,45 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             raise HTTPException(status_code=400, detail="Session is not waiting for a continue decision.")
         engine.continue_session(session_id)
         return {"ok": True}
+
+    @app.post("/api/sessions/{session_id}/agents/{agent_id}/reset-session")
+    async def reset_agent_session(session_id: str, agent_id: str) -> dict:
+        try:
+            session = storage.get_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        agent = next((item for item in session["agents"] if item["id"] == agent_id), None)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="Agent does not belong to this session.")
+        if agent["role"] != "debater":
+            raise HTTPException(status_code=400, detail="Only debater sessions can be reset.")
+
+        had_provider_session = storage.reset_provider_session(agent_id)
+        detail = (
+            f"Reset native session for {agent['display_name']}. Next turn will start fresh."
+            if had_provider_session
+            else f"{agent['display_name']} had no stored native session. Next turn will start fresh."
+        )
+        entry = storage.add_thread_entry(
+            session_id=session_id,
+            kind="system",
+            display_name="Debate Hall",
+            display_text=detail,
+            agent_id=agent_id,
+            payload={"event": "provider_session_reset", "agent_id": agent_id},
+        )
+        await broker.publish(session_id, {"type": "thread_entry_saved", "entry": entry})
+        await broker.publish(
+            session_id,
+            {
+                "type": "provider_session_state",
+                "agent_id": agent_id,
+                "agent_name": agent["display_name"],
+                "provider_session": None,
+            },
+        )
+        return storage.get_session(session_id)
 
     @app.post("/api/sessions/{session_id}/moderator-note")
     async def add_moderator_note(session_id: str, payload: ModeratorNoteRequest) -> dict:
