@@ -12,6 +12,8 @@
     "quantify tradeoffs when possible",
     "optimize for outcomes"
   ],
+  "icon_path": "/static/assets/persona-icons/builtin/utilitarian-analyst.svg",
+  "icon_style_tag": "builtin-pixel-creature",
   "is_builtin": true,
   "is_user_editable": false,
   "is_selectable": true,

@@ -12,6 +12,8 @@ class PersonaModel(BaseModel):
     style: str
     core_values: list[str]
     debate_rules: list[str]
+    icon_path: str | None = None
+    icon_style_tag: str | None = None
     is_builtin: bool = False
     is_user_editable: bool = True
     is_selectable: bool = True
@@ -42,6 +44,7 @@ class AgentConfigModel(BaseModel):
     side: str = "independent"
     persona_id: str | None = None
     persona_mode: str = "manual"
+    persona_intensity: float = Field(default=1.0, ge=0.5, le=1.5)
     command: list[str] | None = None
     args_template: list[str] | None = None
     env: dict[str, str] = Field(default_factory=dict)
@@ -69,6 +72,13 @@ class HumanVoteRequest(BaseModel):
 class QuestionRequest(BaseModel):
     question: str
     judge: JudgeConfigModel
+
+
+class PersonaGenerateRequest(BaseModel):
+    description: str
+    name_hint: str | None = None
+    philosophy_family_hint: str | None = None
+    generator: JudgeConfigModel
 
 
 class JudgeDecisionRequest(BaseModel):

@@ -7,6 +7,7 @@ from llm_debate_hall.storage import Storage
 
 def test_storage_persona_and_session_roundtrip(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
+    builtin = storage.get_persona("stoic_rationalist")
 
     created = storage.create_persona(
         PersonaCreate(
@@ -23,6 +24,9 @@ def test_storage_persona_and_session_roundtrip(tmp_path: Path) -> None:
     )
 
     assert updated["style"].startswith("Cold")
+    assert builtin["icon_path"].endswith("/static/assets/persona-icons/builtin/stoic-rationalist.svg")
+    assert created["icon_path"].startswith("/persona-icons/")
+    assert (storage.persona_icons_dir / f"{created['id']}.svg").exists()
     assert len(storage.get_selectable_personas()) >= len(BUILTIN_PERSONAS)
 
     session = storage.create_session(
@@ -32,6 +36,7 @@ def test_storage_persona_and_session_roundtrip(tmp_path: Path) -> None:
                 "display_name": "Athena",
                 "role": "debater",
                 "side": "pro",
+                "persona_intensity": 1.35,
                 "preset_id": "mock",
                 "model_name": "mock-a",
                 "command": ["mock"],
@@ -42,6 +47,7 @@ def test_storage_persona_and_session_roundtrip(tmp_path: Path) -> None:
                 "display_name": "Burke",
                 "role": "debater",
                 "side": "con",
+                "persona_intensity": 0.8,
                 "preset_id": "mock",
                 "model_name": "mock-b",
                 "command": ["mock"],
@@ -102,6 +108,14 @@ def test_storage_persona_and_session_roundtrip(tmp_path: Path) -> None:
         mode="persistent",
         status="active",
     )
+    trace_event = storage.add_trace_event(
+        session_id=session["id"],
+        event_type="turn_completed",
+        round_type="opening",
+        round_index=1,
+        agent_id=debater["id"],
+        payload={"latency_ms": 123, "estimated_total_tokens": 88},
+    )
 
     exported = storage.export_session(session["id"])
     assert exported["winner_auto"] == debater["id"]
@@ -111,6 +125,8 @@ def test_storage_persona_and_session_roundtrip(tmp_path: Path) -> None:
     assert provider_session["provider_session_id"] == "thread-123"
     exported_debater = next(agent for agent in exported["agents"] if agent["id"] == debater["id"])
     assert exported_debater["provider_session"]["provider_session_id"] == "thread-123"
+    assert exported_debater["persona_intensity"] == 1.35
+    assert exported["trace_events"][0]["id"] == trace_event["id"]
 
 
 def test_storage_migrates_legacy_db_personas_to_files(tmp_path: Path) -> None:
@@ -147,4 +163,6 @@ def test_storage_migrates_legacy_db_personas_to_files(tmp_path: Path) -> None:
 
     persona = migrated.get_persona("db_custom_persona")
     assert persona["name"] == "DB Custom Persona"
+    assert persona["icon_path"].startswith("/persona-icons/")
     assert (personas_root / "custom" / "db_custom_persona.json").exists()
+    assert (migrated.persona_icons_dir / "db_custom_persona.svg").exists()

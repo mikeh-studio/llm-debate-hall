@@ -36,7 +36,7 @@ build-backend = "setuptools.build_meta"
 include = ["llm_debate_hall*"]
 
 [tool.setuptools.package-data]
-llm_debate_hall = ["static/*", "static/assets/*", "static/assets/sprites/*"]
+llm_debate_hall = ["static/*", "static/assets/*", "static/assets/sprites/*", "static/assets/persona-icons/*", "static/assets/persona-icons/builtin/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

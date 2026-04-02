@@ -71,6 +71,39 @@ def test_health_endpoints_return_ok(tmp_path: Path) -> None:
         assert response.json() == {"status": "ok", "app": "llm-debate-hall"}
 
 
+def test_persona_endpoints_include_pixel_icons(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    builtin_response = client.get("/api/personas")
+    created_response = client.post(
+        "/api/personas",
+        json={
+            "name": "Systems Skeptic",
+            "philosophy_family": "Skepticism",
+            "style": "Cold and exacting.",
+            "core_values": ["evidence"],
+            "debate_rules": ["question incentives"],
+        },
+    )
+
+    assert builtin_response.status_code == 200
+    assert created_response.status_code == 200
+
+    builtin = next(persona for persona in builtin_response.json() if persona["id"] == "stoic_rationalist")
+    created = created_response.json()
+    builtin_icon = client.get(builtin["icon_path"])
+    created_icon = client.get(created["icon_path"])
+
+    assert builtin["icon_path"].endswith("/static/assets/persona-icons/builtin/stoic-rationalist.svg")
+    assert created["icon_path"].startswith("/persona-icons/")
+    assert builtin_icon.status_code == 200
+    assert created_icon.status_code == 200
+    assert builtin_icon.headers["content-type"].startswith("image/svg+xml")
+    assert created_icon.headers["content-type"].startswith("image/svg+xml")
+    assert (app.state.storage.persona_icons_dir / f"{created['id']}.svg").exists()
+
+
 def test_question_validation_and_suggestions(tmp_path: Path) -> None:
     app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
     client = TestClient(app)
@@ -121,6 +154,7 @@ def test_api_session_flow_pause_then_judge_decision(tmp_path: Path) -> None:
                     "model_name": "mock-model",
                     "persona_id": "stoic_rationalist",
                     "persona_mode": "manual",
+                    "persona_intensity": 1.25,
                 },
                 {
                     "display_name": "Burke",
@@ -138,6 +172,7 @@ def test_api_session_flow_pause_then_judge_decision(tmp_path: Path) -> None:
     )
     assert session.status_code == 200
     session_id = session.json()["id"]
+    assert session.json()["agents"][0]["persona_intensity"] == 1.25
 
     start = client.post(f"/api/sessions/{session_id}/start")
     assert start.status_code == 200
@@ -422,3 +457,60 @@ def test_api_rejects_judge_provider_session_reset(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert "Only debater sessions can be reset" in response.text
+
+
+def test_api_generates_persona_draft(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/personas/generate",
+        json={
+            "description": "A hard-nosed operator who pushes every claim into execution detail.",
+            "name_hint": "Execution Hawk",
+            "philosophy_family_hint": "Operationalism",
+            "generator": {"display_name": "Persona Smith", "preset_id": "mock", "model_name": "mock-model"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["name"] == "Execution Hawk"
+    assert payload["philosophy_family"] == "Operationalism"
+    assert payload["core_values"]
+    assert payload["debate_rules"]
+
+
+def test_api_trace_endpoints_return_structured_trace(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+    storage = app.state.storage
+
+    session = client.post(
+        "/api/sessions",
+        json={
+            "topic": "Should traces be exportable?",
+            "agents": [
+                {"display_name": "Athena", "preset_id": "mock", "model_name": "mock-model"},
+                {"display_name": "Burke", "preset_id": "mock", "model_name": "mock-model"},
+            ],
+            "judge": {"display_name": "Solon", "preset_id": "mock", "model_name": "mock-model"},
+        },
+    ).json()
+    debater = next(agent for agent in session["agents"] if agent["role"] == "debater")
+    storage.add_trace_event(
+        session_id=session["id"],
+        event_type="turn_completed",
+        round_type="opening",
+        round_index=1,
+        agent_id=debater["id"],
+        payload={"latency_ms": 200, "estimated_total_tokens": 42},
+    )
+
+    trace_response = client.get(f"/api/sessions/{session['id']}/trace")
+    export_response = client.get(f"/api/sessions/{session['id']}/trace/export")
+
+    assert trace_response.status_code == 200
+    assert export_response.status_code == 200
+    assert trace_response.json()["trace_events"][0]["event_type"] == "turn_completed"
+    assert export_response.json()["trace_events"][0]["payload"]["estimated_total_tokens"] == 42

@@ -24,10 +24,13 @@ const state = {
   seatConfigs: [],
   nextSeatId: 0,
   threadEntries: [],
+  traceEvents: [],
   pendingThreadEntry: null,
   questionSuggestions: [],
   arenaFeedback: "",
   arenaFeedbackKind: "",
+  personaFeedback: "",
+  personaFeedbackKind: "",
   startInFlight: false,
   popoverMode: null,
   popoverSeatId: null,
@@ -78,8 +81,22 @@ function parseCsv(value) {
     .filter(Boolean);
 }
 
+function clampPersonaIntensity(value) {
+  const numeric = Number.parseFloat(String(value ?? 1));
+  if (!Number.isFinite(numeric)) return 1;
+  return Math.min(1.5, Math.max(0.5, numeric));
+}
+
 function selectablePersonas() {
   return state.personas.filter((persona) => persona.is_selectable);
+}
+
+function personaById(personaId) {
+  return state.personas.find((persona) => persona.id === personaId) || null;
+}
+
+function personaIconPath(personaId) {
+  return personaById(personaId)?.icon_path || "/static/assets/persona-icons/builtin/fallback.svg";
 }
 
 function defaultPersonaChoiceForSeat(index = 0) {
@@ -140,6 +157,7 @@ function restoreDraft() {
       preset_id: seat.preset_id || defaultSeatPresetId(index),
       model_name: normalizedModelForPreset(seat.preset_id || defaultSeatPresetId(index), seat.model_name || ""),
       persona_choice: seat.persona_choice || defaultPersonaChoiceForSeat(index),
+      persona_intensity: clampPersonaIntensity(seat.persona_intensity),
       command: seat.command || "",
       args_template: seat.args_template || "",
       env_json: seat.env_json || "",
@@ -160,6 +178,11 @@ function restoreDraft() {
 function setArenaFeedback(message = "", kind = "") {
   state.arenaFeedback = message;
   state.arenaFeedbackKind = kind;
+}
+
+function setPersonaFeedback(message = "", kind = "") {
+  state.personaFeedback = message;
+  state.personaFeedbackKind = kind;
 }
 
 function personaOptions(selectedValue = "auto") {
@@ -268,6 +291,7 @@ function buildSeatConfig(index = 0) {
     preset_id: presetId,
     model_name: defaultModelForPreset(presetId),
     persona_choice: defaultPersonaChoiceForSeat(index),
+    persona_intensity: 1,
     command: "",
     args_template: "",
     env_json: "",
@@ -307,6 +331,10 @@ function personaLabel(personaId) {
   return state.personas.find((persona) => persona.id === personaId)?.name || personaId.replaceAll("_", " ");
 }
 
+function personaIntensityLabel(value) {
+  return `${Math.round(clampPersonaIntensity(value) * 100)}%`;
+}
+
 function setView(view) {
   state.activeView = view;
   document.querySelectorAll(".nav-tab").forEach((button) => {
@@ -333,6 +361,7 @@ function renderArenaHeader() {
   const sessionPill = $("active-session-pill");
   if (sessionPill) sessionPill.textContent = state.activeSession ? `${topic} · ${label}` : "";
   $("export-session").disabled = !state.activeSessionId;
+  $("export-trace").disabled = !state.activeSessionId;
   const composerShell = $("arena-composer-shell");
   if (composerShell) {
     composerShell.hidden = !state.activeSession || status === "completed" || status === "failed";
@@ -351,7 +380,7 @@ function renderParticipantStrip() {
         return `
         <div class="participant-chip debater" data-seat-id="${escapeHtml(seat.id)}" role="button" tabindex="0">
           <strong>${escapeHtml(seat.display_name)}</strong>
-          <span>${escapeHtml((seat.model_name || "No model") + " · " + personaLabel(seat.persona_id) + sessionStatusNote)}</span>
+          <span>${escapeHtml((seat.model_name || "No model") + " · " + personaLabel(seat.persona_id) + " · " + personaIntensityLabel(seat.persona_intensity) + sessionStatusNote)}</span>
         </div>
       `;
       }
@@ -435,12 +464,109 @@ function deriveThreadEntriesFromSession(session) {
 function syncThreadEntriesFromSession(session) {
   state.threadEntries = deriveThreadEntriesFromSession(session);
   state.pendingThreadEntry = null;
+  state.traceEvents = Array.isArray(session.trace_events) ? [...session.trace_events] : [];
 }
 
 function threadEntriesForRender() {
   const entries = [...state.threadEntries];
   if (state.pendingThreadEntry) entries.push(state.pendingThreadEntry);
   return entries;
+}
+
+function formatLatency(ms) {
+  if (ms == null || Number.isNaN(Number(ms))) return "n/a";
+  return `${Math.round(Number(ms))} ms`;
+}
+
+function formatEstimatedCost(value) {
+  if (value == null || value === "") return "n/a";
+  return `$${Number(value).toFixed(Number(value) < 0.01 ? 4 : 3)}`;
+}
+
+function latestTurnTraceEvent() {
+  return [...state.traceEvents].reverse().find((event) => event.event_type === "turn_completed") || null;
+}
+
+function traceEventSummary(event) {
+  if (!event) return "";
+  if (event.payload?.summary) return event.payload.summary;
+  const label = event.event_type.replaceAll("_", " ");
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+function renderObservability() {
+  const summary = $("observability-summary");
+  const timeline = $("trace-timeline");
+  if (!summary || !timeline) return;
+  if (!state.activeSession) {
+    summary.innerHTML = "";
+    timeline.innerHTML = "";
+    return;
+  }
+
+  const latestTurn = latestTurnTraceEvent();
+  summary.innerHTML = latestTurn
+    ? `
+      <article class="observability-card">
+        <div class="observability-card-head">
+          <div>
+            <span class="arena-presentation-badge">Observability</span>
+            <h3>${escapeHtml(latestTurn.agent_name || "Latest turn")}</h3>
+          </div>
+          <span class="trace-event-type">${escapeHtml((latestTurn.round_type || "turn").replaceAll("_", " "))}</span>
+        </div>
+        <div class="observability-metrics">
+          <div><strong>Latency</strong><span>${escapeHtml(formatLatency(latestTurn.payload?.latency_ms))}</span></div>
+          <div><strong>Provider</strong><span>${escapeHtml(latestTurn.payload?.preset_id || "n/a")}</span></div>
+          <div><strong>Model</strong><span>${escapeHtml(latestTurn.payload?.model_name || "n/a")}</span></div>
+          <div><strong>Fallback</strong><span>${latestTurn.payload?.used_fallback ? "Yes" : "No"}</span></div>
+          <div><strong>Tokens</strong><span>${escapeHtml(String(latestTurn.payload?.estimated_total_tokens ?? "n/a"))}</span></div>
+          <div><strong>Cost</strong><span>${escapeHtml(formatEstimatedCost(latestTurn.payload?.estimated_cost_usd))}</span></div>
+        </div>
+      </article>
+    `
+    : `
+      <article class="observability-card empty">
+        <span class="arena-presentation-badge">Observability</span>
+        <p>No completed turn metrics yet. Start a debate to populate the trace timeline.</p>
+      </article>
+    `;
+
+  timeline.innerHTML = `
+    <div class="observability-card">
+      <div class="observability-card-head">
+        <div>
+          <span class="arena-presentation-badge">Timeline</span>
+          <h3>Session Trace</h3>
+        </div>
+        <span class="trace-event-type">${escapeHtml(String(state.traceEvents.length))} events</span>
+      </div>
+      <div class="timeline-list">
+        ${
+          state.traceEvents.length
+            ? state.traceEvents
+                .map(
+                  (event) => `
+                    <article class="timeline-item">
+                      <div class="timeline-item-head">
+                        <strong>${escapeHtml(traceEventSummary(event))}</strong>
+                        <span>${escapeHtml(new Date(event.created_at).toLocaleTimeString())}</span>
+                      </div>
+                      <div class="timeline-item-meta">
+                        <span>${escapeHtml(event.agent_name || "System")}</span>
+                        <span>${escapeHtml(event.event_type)}</span>
+                        ${event.payload?.latency_ms != null ? `<span>${escapeHtml(formatLatency(event.payload.latency_ms))}</span>` : ""}
+                        ${event.payload?.provider_session_status ? `<span>${escapeHtml(event.payload.provider_session_status)}</span>` : ""}
+                      </div>
+                    </article>
+                  `
+                )
+                .join("")
+            : '<p class="timeline-empty">No trace events yet.</p>'
+        }
+      </div>
+    </div>
+  `;
 }
 
 function activeRoundForPendingSpeaker() {
@@ -561,6 +687,9 @@ function activeStageSpeakerEntry() {
 function spriteForActor(actor, index = 0) {
   if (actor.role === "judge") {
     return "/static/assets/sprites/judge-archivist.svg";
+  }
+  if (actor.persona_id) {
+    return personaIconPath(actor.persona_id);
   }
   const variants = [
     "/static/assets/sprites/debater-sage.svg",
@@ -797,6 +926,18 @@ function renderSeatSetup() {
             <span>Persona</span>
             <select data-field="persona_choice" ${locked ? "disabled" : ""}>${personaOptions(seat.persona_choice)}</select>
           </label>
+          <label class="field">
+            <span>Persona Intensity <strong>${escapeHtml(personaIntensityLabel(seat.persona_intensity))}</strong></span>
+            <input
+              data-field="persona_intensity"
+              type="range"
+              min="0.5"
+              max="1.5"
+              step="0.05"
+              value="${escapeHtml(clampPersonaIntensity(seat.persona_intensity))}"
+              ${locked ? "disabled" : ""}
+            />
+          </label>
           <details class="advanced-panel">
             <summary>Advanced backend settings</summary>
             <label class="field">
@@ -871,6 +1012,7 @@ function renderArena() {
   renderParticipantStrip();
   renderArenaFeedback();
   renderSuggestionList();
+  renderObservability();
   renderArenaPresentation();
   renderThread();
   renderQuickActions();
@@ -882,17 +1024,48 @@ function renderPersonas() {
     .map(
       (persona) => `
         <article class="persona-item">
-          <h3>${escapeHtml(persona.name)}</h3>
-          <p>${escapeHtml(persona.philosophy_family)}</p>
-          <p>${escapeHtml(persona.style)}</p>
+          <div class="persona-item-head">
+            <div class="persona-item-art">
+              <img
+                class="persona-item-icon"
+                src="${escapeHtml(persona.icon_path || "/static/assets/persona-icons/builtin/fallback.svg")}"
+                alt="${escapeHtml(`${persona.name} icon`)}"
+              />
+            </div>
+            <div class="persona-item-copy">
+              <div class="persona-item-meta-row">
+                <h3>${escapeHtml(persona.name)}</h3>
+                <span class="persona-origin">${persona.is_builtin ? "Built-in" : "Custom"}</span>
+              </div>
+              <p>${escapeHtml(persona.philosophy_family)}</p>
+              <p>${escapeHtml(persona.style)}</p>
+            </div>
+          </div>
           <p>Values: ${escapeHtml(persona.core_values.join(", ") || "None")}</p>
           <p>Rules: ${escapeHtml(persona.debate_rules.join(", ") || "None")}</p>
-          <p>${persona.is_builtin ? "Built-in" : "Custom"} · ${persona.is_selectable ? "Selectable" : "Hidden"}</p>
-          ${persona.is_user_editable ? `<button data-persona-id="${escapeHtml(persona.id)}">Edit</button>` : ""}
+          <div class="persona-item-footer">
+            <p>${persona.is_selectable ? "Selectable" : "Hidden"}${persona.icon_style_tag ? ` · ${escapeHtml(persona.icon_style_tag.replaceAll("-", " "))}` : ""}</p>
+            ${persona.is_user_editable ? `<button data-persona-id="${escapeHtml(persona.id)}">Edit</button>` : ""}
+          </div>
         </article>
       `
     )
     .join("");
+  const feedback = $("persona-feedback");
+  if (feedback) {
+    feedback.className = `thread-feedback${state.personaFeedback ? " is-visible" : ""}${state.personaFeedbackKind ? ` is-${state.personaFeedbackKind}` : ""}`;
+    feedback.textContent = state.personaFeedback;
+  }
+}
+
+function renderPersonaGeneratorModelDropdown() {
+  const presetId = $("persona-generator-preset").value || preferredPresetId();
+  const currentValue = $("persona-generator-model").dataset.value || "";
+  const nextValue = normalizedModelForPreset(presetId, currentValue);
+  $("persona-generator-model").innerHTML = modelOptions(presetId, nextValue);
+  $("persona-generator-model").dataset.value = nextValue;
+  $("persona-generator-model").value = nextValue;
+  $("persona-generator-note").textContent = presetNoteText(presetId);
 }
 
 function renderSessions() {
@@ -947,6 +1120,14 @@ function getJudgePayload() {
   };
 }
 
+function getPersonaGeneratorPayload() {
+  return {
+    display_name: "Persona Smith",
+    preset_id: $("persona-generator-preset").value,
+    model_name: $("persona-generator-model").value,
+  };
+}
+
 function validateSeatConfig() {
   if (state.seatConfigs.length < 2 || state.seatConfigs.length > 5) {
     throw new Error("Debates must have between 2 and 5 debaters.");
@@ -974,6 +1155,7 @@ function applySessionToDraft(session) {
       command: agent.command?.length ? JSON.stringify(agent.command) : "",
       args_template: agent.args_template?.length ? JSON.stringify(agent.args_template) : "",
       env_json: agent.env && Object.keys(agent.env).length ? JSON.stringify(agent.env) : "",
+      persona_intensity: clampPersonaIntensity(agent.persona_intensity),
     }));
   const judge = session.agents.find((agent) => agent.role === "judge");
   if (judge) {
@@ -1093,6 +1275,13 @@ async function connectSocket(sessionId) {
         const agent = state.activeSession.agents.find((item) => item.id === event.agent_id);
         if (agent) agent.provider_session = event.provider_session;
         renderParticipantStrip();
+        renderObservability();
+        return;
+      }
+
+      if (event.type === "trace_event_saved") {
+        state.traceEvents.push(event.trace_event);
+        renderObservability();
         return;
       }
 
@@ -1215,6 +1404,7 @@ async function startDebate() {
   setArenaFeedback("Opening the chamber...", "success");
   if (!hadActiveSession) {
     state.threadEntries = [];
+    state.traceEvents = [];
     state.pendingThreadEntry = null;
     pushLocalSystemEntry("Opening the chamber. The council is taking the stage...");
   }
@@ -1237,6 +1427,7 @@ async function startDebate() {
         model_name: seat.model_name,
         persona_id: seat.persona_choice === "auto" ? null : seat.persona_choice,
         persona_mode: seat.persona_choice === "auto" ? "auto" : "manual",
+        persona_intensity: clampPersonaIntensity(seat.persona_intensity),
         command: parseJsonArray(seat.command),
         args_template: parseJsonArray(seat.args_template),
         env: parseJsonObject(seat.env_json),
@@ -1276,6 +1467,7 @@ async function startDebate() {
     console.error(error);
     if (!state.activeSessionId) {
       state.threadEntries = [];
+      state.traceEvents = [];
       state.pendingThreadEntry = null;
       setView(previousView);
     }
@@ -1399,20 +1591,50 @@ async function savePersona() {
     debate_rules: parseCsv($("persona-rules").value),
     is_selectable: $("persona-selectable").checked,
   };
+  setPersonaFeedback(personaId ? "Saving persona..." : "Forging persona icon and saving...", "success");
+  renderPersonas();
+  let savedPersona;
   if (personaId) {
-    await fetchJson(`/api/personas/${personaId}`, {
+    savedPersona = await fetchJson(`/api/personas/${personaId}`, {
       method: "PUT",
       body: JSON.stringify(payload),
     });
   } else {
-    await fetchJson("/api/personas", {
+    savedPersona = await fetchJson("/api/personas", {
       method: "POST",
       body: JSON.stringify(payload),
     });
   }
   clearPersonaForm();
   await loadPersonas();
+  setPersonaFeedback(
+    savedPersona?.icon_style_tag === "fallback-pixel-creature"
+      ? "Persona saved, but icon generation fell back to the default crest."
+      : "Persona saved with its pixel icon.",
+    savedPersona?.icon_style_tag === "fallback-pixel-creature" ? "error" : "success"
+  );
+  renderPersonas();
   renderSettingsDrawer();
+}
+
+async function generatePersonaDraft() {
+  const description = $("persona-description").value.trim();
+  if (!description) throw new Error("Describe the persona you want first.");
+  setPersonaFeedback("Generating persona draft...", "success");
+  renderPersonas();
+  const payload = {
+    description,
+    name_hint: $("persona-name-hint").value.trim() || null,
+    philosophy_family_hint: $("persona-family-hint").value.trim() || null,
+    generator: getPersonaGeneratorPayload(),
+  };
+  const persona = await fetchJson("/api/personas/generate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  fillPersonaForm(persona);
+  setPersonaFeedback("Generated a persona draft. Review and save it to add it to the library.", "success");
+  renderPersonas();
 }
 
 async function loadPersonas() {
@@ -1430,6 +1652,7 @@ async function reuseSession(sessionId) {
   state.activeSessionId = null;
   state.activeSession = null;
   state.threadEntries = [];
+  state.traceEvents = [];
   applySessionToDraft(session);
   $("main-composer").value = session.topic;
   persistDraft();
@@ -1444,6 +1667,7 @@ async function deleteSession(sessionId) {
     state.activeSessionId = null;
     state.activeSession = null;
     state.threadEntries = [];
+    state.traceEvents = [];
     renderArena();
   }
   await refreshSessions();
@@ -1467,9 +1691,10 @@ function registerSeatListeners() {
     if (!field || !card) return;
     const seat = state.seatConfigs.find((item) => item.id === card.dataset.seatId);
     if (!seat) return;
-    seat[field] = event.target.value;
+    seat[field] = field === "persona_intensity" ? clampPersonaIntensity(event.target.value) : event.target.value;
     renderParticipantStrip();
     persistDraft();
+    if (field === "persona_intensity") renderSettingsDrawer();
   });
 
   $("seat-setup").addEventListener("change", (event) => {
@@ -1479,7 +1704,7 @@ function registerSeatListeners() {
     if (!field || !card) return;
     const seat = state.seatConfigs.find((item) => item.id === card.dataset.seatId);
     if (!seat) return;
-    seat[field] = event.target.value;
+    seat[field] = field === "persona_intensity" ? clampPersonaIntensity(event.target.value) : event.target.value;
     if (field === "preset_id") {
       seat.model_name = defaultModelForPreset(seat.preset_id);
       persistDraft();
@@ -1533,6 +1758,10 @@ function registerArenaListeners() {
   $("export-session").addEventListener("click", () => {
     if (!state.activeSessionId) return;
     window.open(`/api/sessions/${state.activeSessionId}/export`, "_blank");
+  });
+  $("export-trace").addEventListener("click", () => {
+    if (!state.activeSessionId) return;
+    window.open(`/api/sessions/${state.activeSessionId}/trace/export`, "_blank");
   });
 
   $("arena-moderator-submit").addEventListener("click", () => sendModeratorNote().catch(alert));
@@ -1590,6 +1819,18 @@ function registerJudgeListeners() {
 
 function registerPersonaListeners() {
   $("save-persona").addEventListener("click", () => savePersona().catch(alert));
+  $("generate-persona").addEventListener("click", () => generatePersonaDraft().catch((error) => {
+    console.error(error);
+    setPersonaFeedback(error.message || "Persona generation failed.", "error");
+    renderPersonas();
+  }));
+  $("persona-generator-preset").addEventListener("change", () => {
+    $("persona-generator-model").dataset.value = defaultModelForPreset($("persona-generator-preset").value);
+    renderPersonaGeneratorModelDropdown();
+  });
+  $("persona-generator-model").addEventListener("change", () => {
+    $("persona-generator-model").dataset.value = $("persona-generator-model").value;
+  });
   $("persona-list").addEventListener("click", (event) => {
     const personaId = event.target.dataset.personaId;
     if (!personaId) return;
@@ -1654,11 +1895,15 @@ async function boot() {
   const defaultJudgePresetId = preferredPresetId();
   $("judge-preset").innerHTML = presetOptions(defaultJudgePresetId);
   $("judge-preset").value = defaultJudgePresetId;
+  $("persona-generator-preset").innerHTML = presetOptions(defaultJudgePresetId);
+  $("persona-generator-preset").value = defaultJudgePresetId;
 
   await loadPersonas();
   state.presentationMode = readArenaPresentationMode();
   initializeSeatConfigs();
   restoreDraft();
+  $("persona-generator-model").dataset.value = defaultModelForPreset($("persona-generator-preset").value);
+  renderPersonaGeneratorModelDropdown();
   renderArena();
   await refreshSessions();
 }

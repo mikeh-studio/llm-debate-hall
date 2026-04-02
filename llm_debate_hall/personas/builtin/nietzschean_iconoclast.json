@@ -12,6 +12,8 @@
     "attack hidden assumptions",
     "reject empty moralizing"
   ],
+  "icon_path": "/static/assets/persona-icons/builtin/nietzschean-iconoclast.svg",
+  "icon_style_tag": "builtin-pixel-creature",
   "is_builtin": true,
   "is_user_editable": false,
   "is_selectable": true,

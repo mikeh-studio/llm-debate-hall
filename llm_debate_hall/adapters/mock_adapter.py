@@ -33,6 +33,25 @@ class MockDebateAdapter(DebateAdapter):
         elif request.output_mode == "question_suggestions":
             seed = self._line_value(request.prompt, "SEED:")
             raw_text = json.dumps({"suggestions": self._suggestions(seed)})
+        elif request.output_mode == "persona_generation":
+            description = self._line_value(request.prompt, "DESCRIPTION:")
+            name_hint = self._line_value(request.prompt, "NAME_HINT:")
+            family_hint = self._line_value(request.prompt, "FAMILY_HINT:")
+            raw_text = json.dumps(
+                {
+                    "name": name_hint or "Generated Persona",
+                    "philosophy_family": family_hint or "Synthetic School",
+                    "style": (
+                        f"A generated debating style shaped by: {description or 'clear reasoning and forceful rebuttals'}."
+                    ),
+                    "core_values": ["clarity", "evidence", "consistency"],
+                    "debate_rules": [
+                        "define terms before arguing",
+                        "attack assumptions directly",
+                        "end with one pressure-testing question",
+                    ],
+                }
+            )
         elif request.output_mode == "judge":
             winner = self._winner_from_prompt(request.prompt)
             raw_text = json.dumps(

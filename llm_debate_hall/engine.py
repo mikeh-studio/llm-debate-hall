@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from typing import Any, Callable
 
@@ -22,6 +23,21 @@ from llm_debate_hall.storage import Storage
 
 REPLY_ROUNDS_PER_CYCLE = 2
 PERSONA_SELECTION_STATUS = "selecting_personas"
+PERSONA_INTENSITY_DEFAULT = 1.0
+PERSONA_INTENSITY_MIN = 0.5
+PERSONA_INTENSITY_MAX = 1.5
+
+MODEL_PRICING_USD_PER_1K_TOKENS: dict[tuple[str, str], tuple[float, float]] = {
+    ("openai", "gpt-5"): (0.00125, 0.01),
+    ("openai", "gpt-5-mini"): (0.00025, 0.002),
+    ("openai", "gpt-4.1"): (0.002, 0.008),
+    ("openai", "gpt-4.1-mini"): (0.0004, 0.0016),
+    ("anthropic", "sonnet"): (0.003, 0.015),
+    ("anthropic", "claude-sonnet-4"): (0.003, 0.015),
+    ("anthropic", "claude-3-7-sonnet"): (0.003, 0.015),
+    ("anthropic", "opus"): (0.015, 0.075),
+    ("anthropic", "claude-opus-4.1"): (0.015, 0.075),
+}
 
 
 def _env_flag(name: str) -> bool:
@@ -52,6 +68,52 @@ def _required_json(raw_text: str, *, context: str, preset_id: str, model_name: s
     if payload is None:
         raise RuntimeError(f"{context} returned invalid JSON for {preset_id}:{model_name}.")
     return payload
+
+
+def _estimate_tokens(text: str) -> int:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return 0
+    return max(1, round(len(cleaned) / 4))
+
+
+def _estimate_usage(prompt: str, raw_output: str, preset_id: str, model_name: str) -> dict[str, Any]:
+    prompt_tokens = _estimate_tokens(prompt)
+    output_tokens = _estimate_tokens(raw_output)
+    total_tokens = prompt_tokens + output_tokens
+    pricing = MODEL_PRICING_USD_PER_1K_TOKENS.get((preset_id, model_name))
+    estimated_cost_usd = None
+    if pricing:
+        prompt_rate, output_rate = pricing
+        estimated_cost_usd = round((prompt_tokens * prompt_rate + output_tokens * output_rate) / 1000, 6)
+    return {
+        "estimate_source": "heuristic",
+        "estimated_prompt_tokens": prompt_tokens,
+        "estimated_output_tokens": output_tokens,
+        "estimated_total_tokens": total_tokens,
+        "estimated_cost_usd": estimated_cost_usd,
+    }
+
+
+def _persona_intensity_value(agent: dict[str, Any]) -> float:
+    raw = agent.get("persona_intensity")
+    try:
+        value = float(raw if raw is not None else PERSONA_INTENSITY_DEFAULT)
+    except (TypeError, ValueError):
+        value = PERSONA_INTENSITY_DEFAULT
+    return min(PERSONA_INTENSITY_MAX, max(PERSONA_INTENSITY_MIN, value))
+
+
+def _persona_intensity_guidance(value: float) -> str:
+    if value <= 0.7:
+        return "Play the persona subtly. Keep the voice restrained and avoid exaggerating the worldview."
+    if value <= 0.95:
+        return "Play the persona with mild coloration. Let the worldview shape emphasis more than theatrics."
+    if value < 1.2:
+        return "Play the persona at a balanced default intensity."
+    if value < 1.4:
+        return "Play the persona vividly. Let the worldview strongly shape framing, tone, and attacks."
+    return "Play the persona at high intensity. Make the worldview unmistakable, but remain coherent and concise."
 
 
 def active_models_for_preset(preset_id: str, env: dict[str, str] | None = None) -> list[str]:
@@ -141,6 +203,11 @@ class DebateEngine:
 
             await self._set_session_status(session_id, "awaiting_continue")
         except Exception as exc:
+            await self._publish_trace_event(
+                session_id,
+                event_type="session_failed",
+                payload={"summary": str(exc)},
+            )
             entry = self.storage.add_thread_entry(
                 session_id=session_id,
                 kind="system",
@@ -166,6 +233,13 @@ class DebateEngine:
         round_index: int,
     ) -> int:
         round_id = self.storage.create_round(session_id, round_index, round_type)
+        await self._publish_trace_event(
+            session_id,
+            event_type="round_started",
+            round_type=round_type,
+            round_index=round_index,
+            payload={"summary": f"Round {round_index} started: {round_type}."},
+        )
         thread_entry = self.storage.add_thread_entry(
             session_id=session_id,
             kind="system",
@@ -189,6 +263,13 @@ class DebateEngine:
                 agent=agent,
             )
         self.storage.complete_round(round_id)
+        await self._publish_trace_event(
+            session_id,
+            event_type="round_completed",
+            round_type=round_type,
+            round_index=round_index,
+            payload={"summary": f"Round {round_index} completed: {round_type}."},
+        )
         await self.broker.publish(
             session_id,
             {"type": "round_completed", "round_type": round_type, "round_index": round_index},
@@ -279,8 +360,39 @@ class DebateEngine:
             else None
         )
         thread_entry_id = uuid.uuid4().hex
+        turn_started_at = time.perf_counter()
+        started_at_iso = self.storage.add_trace_event(
+            session_id=session_id,
+            event_type="turn_started",
+            round_type=round_type,
+            round_index=round_index,
+            agent_id=agent["id"],
+            payload={
+                "summary": f"{agent['display_name']} started a {round_type} turn.",
+                "preset_id": agent["preset_id"],
+                "model_name": agent["model_name"],
+                "persona_id": agent["persona_id"],
+                "persona_intensity": _persona_intensity_value(agent),
+            },
+        )
+        await self.broker.publish(session_id, {"type": "trace_event_saved", "trace_event": started_at_iso})
+        first_chunk_latency_ms: int | None = None
 
         async def on_chunk(chunk: str) -> None:
+            nonlocal first_chunk_latency_ms
+            if first_chunk_latency_ms is None:
+                first_chunk_latency_ms = round((time.perf_counter() - turn_started_at) * 1000)
+                await self._publish_trace_event(
+                    session_id,
+                    event_type="turn_first_chunk",
+                    round_type=round_type,
+                    round_index=round_index,
+                    agent_id=agent["id"],
+                    payload={
+                        "summary": f"{agent['display_name']} started streaming.",
+                        "latency_ms": first_chunk_latency_ms,
+                    },
+                )
             await self.broker.publish(
                 session_id,
                 {
@@ -328,6 +440,22 @@ class DebateEngine:
         )
 
         if should_try_persistent:
+            await self._publish_trace_event(
+                session_id,
+                event_type="provider_session_attempt",
+                round_type=round_type,
+                round_index=round_index,
+                agent_id=agent["id"],
+                payload={
+                    "summary": (
+                        f"{agent['display_name']} attempted a persistent provider session resume."
+                        if active_provider_session
+                        else f"{agent['display_name']} started a persistent provider session."
+                    ),
+                    "provider_session_mode": active_provider_session["mode"] if active_provider_session else "persistent",
+                    "provider_session_status": active_provider_session["status"] if active_provider_session else "new",
+                },
+            )
             request.prompt = self._build_persistent_turn_prompt(
                 session=session,
                 topic=topic,
@@ -359,6 +487,18 @@ class DebateEngine:
                         "provider_session": persisted_session,
                     },
                 )
+                await self._publish_trace_event(
+                    session_id,
+                    event_type="provider_session_state",
+                    round_type=round_type,
+                    round_index=round_index,
+                    agent_id=agent["id"],
+                    payload={
+                        "summary": f"{agent['display_name']} is using a persistent provider session.",
+                        "provider_session_mode": persisted_session["mode"],
+                        "provider_session_status": persisted_session["status"],
+                    },
+                )
             except SubprocessAdapterError as exc:
                 if not exc.allow_stateless_fallback:
                     raise
@@ -378,6 +518,19 @@ class DebateEngine:
                         "agent_id": agent["id"],
                         "agent_name": agent["display_name"],
                         "provider_session": fallback_session,
+                    },
+                )
+                await self._publish_trace_event(
+                    session_id,
+                    event_type="provider_session_fallback",
+                    round_type=round_type,
+                    round_index=round_index,
+                    agent_id=agent["id"],
+                    payload={
+                        "summary": f"{agent['display_name']} fell back to stateless replay.",
+                        "provider_session_mode": fallback_session["mode"],
+                        "provider_session_status": fallback_session["status"],
+                        "last_error": str(exc),
                     },
                 )
                 request.prompt = prompt
@@ -401,12 +554,28 @@ class DebateEngine:
                         "provider_session": fallback_session,
                     },
                 )
+                await self._publish_trace_event(
+                    session_id,
+                    event_type="provider_session_fallback",
+                    round_type=round_type,
+                    round_index=round_index,
+                    agent_id=agent["id"],
+                    payload={
+                        "summary": f"{agent['display_name']} fell back to stateless replay.",
+                        "provider_session_mode": fallback_session["mode"],
+                        "provider_session_status": fallback_session["status"],
+                        "last_error": str(exc),
+                    },
+                )
                 request.prompt = prompt
                 response = await adapter.generate(request, on_chunk)
         else:
             response = await adapter.generate(request, on_chunk)
 
         payload = self._normalize_turn_payload(response.raw_text, agent["display_name"], round_type)
+        usage = _estimate_usage(request.prompt, response.raw_text, agent["preset_id"], agent["model_name"])
+        latency_ms = round((time.perf_counter() - turn_started_at) * 1000)
+        current_provider_session = self.storage.get_provider_session(agent["id"])
         message = self.storage.add_message(
             session_id=session_id,
             round_type=round_type,
@@ -428,6 +597,27 @@ class DebateEngine:
             agent_id=agent["id"],
             payload=payload,
             entry_id=thread_entry_id,
+        )
+        await self._publish_trace_event(
+            session_id,
+            event_type="turn_completed",
+            round_type=round_type,
+            round_index=round_index,
+            agent_id=agent["id"],
+            payload={
+                "summary": f"{agent['display_name']} completed a {round_type} turn.",
+                "preset_id": agent["preset_id"],
+                "model_name": agent["model_name"],
+                "stream_status": response.stream_status,
+                "latency_ms": latency_ms,
+                "first_chunk_latency_ms": first_chunk_latency_ms,
+                "persona_id": agent["persona_id"],
+                "persona_intensity": _persona_intensity_value(agent),
+                "provider_session_mode": current_provider_session["mode"] if current_provider_session else "stateless",
+                "provider_session_status": current_provider_session["status"] if current_provider_session else "stateless",
+                "used_fallback": bool(current_provider_session and current_provider_session["status"] == "fallback"),
+                **usage,
+            },
         )
         await self.broker.publish(
             session_id,
@@ -484,6 +674,17 @@ class DebateEngine:
                 "raw_text": response.raw_text,
             },
         )
+        await self._publish_trace_event(
+            session_id,
+            event_type="judge_completed",
+            agent_id=judge["id"],
+            payload={
+                "summary": f"{judge['display_name']} selected a winner.",
+                "preset_id": judge["preset_id"],
+                "model_name": judge["model_name"],
+                "winner_agent_id": score["winner_agent_id"],
+            },
+        )
         await self.broker.publish(session_id, {"type": "judge_result", "judge_score": score})
         await self.broker.publish(session_id, {"type": "thread_entry_saved", "entry": thread_entry})
 
@@ -513,11 +714,14 @@ class DebateEngine:
             "opening": "State your position in exactly one concise paragraph.",
             "reply": "Respond to the chamber in exactly one concise paragraph.",
         }
+        intensity = _persona_intensity_value(agent)
         return (
             "You are participating in a structured debate.\n"
             f"TOPIC: {topic}\n"
             f"ROUND: {round_type}\n"
             f"PERSONA: {persona['name']} | {persona['style']}\n"
+            f"PERSONA INTENSITY: {intensity:.2f}\n"
+            f"INTENSITY GUIDANCE: {_persona_intensity_guidance(intensity)}\n"
             f"VALUES: {', '.join(persona['core_values'])}\n"
             f"RULES: {', '.join(persona['debate_rules'])}\n"
             f"INSTRUCTION: {round_instructions[round_type]}\n"
@@ -546,12 +750,15 @@ class DebateEngine:
             "opening": "State your position in exactly one concise paragraph.",
             "reply": "Respond to the chamber in exactly one concise paragraph.",
         }
+        intensity = _persona_intensity_value(agent)
         updates = self._summarize_messages_since_last_turn(session, agent["id"])
         return (
             "You are continuing the same structured debate session.\n"
             f"TOPIC: {topic}\n"
             f"ROUND: {round_type}\n"
             f"PERSONA: {persona['name']} | {persona['style']}\n"
+            f"PERSONA INTENSITY: {intensity:.2f}\n"
+            f"INTENSITY GUIDANCE: {_persona_intensity_guidance(intensity)}\n"
             f"VALUES: {', '.join(persona['core_values'])}\n"
             f"RULES: {', '.join(persona['debate_rules'])}\n"
             f"INSTRUCTION: {round_instructions[round_type]}\n"
@@ -656,6 +863,27 @@ class DebateEngine:
     async def _set_session_status(self, session_id: str, status: str) -> None:
         self.storage.update_session_status(session_id, status)
         await self.broker.publish(session_id, {"type": "status", "status": status})
+
+    async def _publish_trace_event(
+        self,
+        session_id: str,
+        *,
+        event_type: str,
+        round_type: str | None = None,
+        round_index: int | None = None,
+        agent_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        event = self.storage.add_trace_event(
+            session_id=session_id,
+            event_type=event_type,
+            round_type=round_type,
+            round_index=round_index,
+            agent_id=agent_id,
+            payload=payload,
+        )
+        await self.broker.publish(session_id, {"type": "trace_event_saved", "trace_event": event})
+        return event
 
     def _spawn(self, session_id: str, coroutine_factory: Callable[[], asyncio.Future | Any]) -> None:
         existing = self._threads.get(session_id)

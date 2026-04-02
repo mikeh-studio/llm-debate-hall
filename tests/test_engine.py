@@ -582,3 +582,81 @@ def test_visible_presets_uses_cached_models_without_live_probe(monkeypatch) -> N
     assert openai["model_validation_mode"] == "validated"
     assert anthropic["active_models"] == anthropic["models"]
     assert anthropic["model_validation_mode"] == "fallback"
+
+
+def test_engine_records_turn_trace_metrics(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
+    broker = EventBroker()
+    engine = DebateEngine(storage=storage, broker=broker)
+
+    session = storage.create_session(
+        "Should Debate Hall expose turn metrics?",
+        [
+            {
+                "display_name": "Athena",
+                "role": "debater",
+                "side": "independent",
+                "persona_id": "stoic_rationalist",
+                "persona_intensity": 1.3,
+                "preset_id": "mock",
+                "model_name": "mock-model",
+                "command": ["mock"],
+                "args_template": [],
+                "env": {},
+            },
+            {
+                "display_name": "Burke",
+                "role": "debater",
+                "side": "independent",
+                "persona_id": "pragmatic_engineer",
+                "persona_intensity": 0.75,
+                "preset_id": "mock",
+                "model_name": "mock-model",
+                "command": ["mock"],
+                "args_template": [],
+                "env": {},
+            },
+        ],
+        {
+            "display_name": "Solon",
+            "role": "judge",
+            "side": "judge",
+            "preset_id": "mock",
+            "model_name": "mock-model",
+            "command": ["mock"],
+            "args_template": [],
+            "env": {},
+        },
+    )
+
+    asyncio.run(engine.run_segment(session["id"]))
+    result = storage.get_session(session["id"])
+    completed_turns = [event for event in result["trace_events"] if event["event_type"] == "turn_completed"]
+
+    assert completed_turns
+    assert completed_turns[0]["payload"]["latency_ms"] >= 0
+    assert completed_turns[0]["payload"]["estimated_total_tokens"] > 0
+    assert completed_turns[0]["payload"]["estimate_source"] == "heuristic"
+    assert completed_turns[0]["payload"]["persona_intensity"] in {1.3, 0.75}
+
+
+def test_engine_builds_turn_prompt_with_persona_intensity_guidance(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
+    broker = EventBroker()
+    engine = DebateEngine(storage=storage, broker=broker)
+
+    session = {
+        "messages": [],
+        "thread_entries": [],
+    }
+    agent = {
+        "id": "agent-1",
+        "display_name": "Athena",
+        "persona_id": "stoic_rationalist",
+        "persona_intensity": 1.45,
+    }
+
+    prompt = engine._build_turn_prompt(session, "Should personas vary in intensity?", agent, "opening")
+
+    assert "PERSONA INTENSITY: 1.45" in prompt
+    assert "INTENSITY GUIDANCE:" in prompt
