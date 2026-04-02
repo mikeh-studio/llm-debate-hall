@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_debate_hall.models import PersonaCreate, PersonaModel, PersonaUpdate
+from llm_debate_hall.persona_icons import ensure_persona_icon, generated_persona_icons_dir
 from llm_debate_hall.personas import builtin_personas_dir, custom_personas_dir, load_persona_payload, personas_root
 
 
@@ -33,6 +34,7 @@ class Storage:
         )
         self._builtin_dir = builtin_personas_dir(self.personas_root)
         self._custom_dir = custom_personas_dir(self.personas_root)
+        self.persona_icons_dir = generated_persona_icons_dir(self.personas_root)
         self._ensure_db()
         self._ensure_persona_store()
         self._migrate_personas_from_db()
@@ -85,6 +87,7 @@ class Storage:
                     args_template_json TEXT NOT NULL,
                     env_json TEXT NOT NULL,
                     persona_id TEXT,
+                    persona_intensity REAL NOT NULL DEFAULT 1.0,
                     ordering INTEGER NOT NULL
                 );
 
@@ -147,8 +150,26 @@ class Storage:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS trace_events (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    event_type TEXT NOT NULL,
+                    round_type TEXT,
+                    round_index INTEGER,
+                    agent_id TEXT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
+            self._ensure_column(conn, "session_agents", "persona_intensity", "ALTER TABLE session_agents ADD COLUMN persona_intensity REAL NOT NULL DEFAULT 1.0")
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        columns = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if any(item["name"] == column for item in columns):
+            return
+        conn.execute(ddl)
 
     def seed_personas(self, personas: list[PersonaModel]) -> None:
         for persona in personas:
@@ -237,9 +258,9 @@ class Storage:
                     """
                     INSERT INTO session_agents (
                         id, session_id, display_name, role, side, preset_id, model_name,
-                        command_json, args_template_json, env_json, persona_id, ordering
+                        command_json, args_template_json, env_json, persona_id, persona_intensity, ordering
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         agent_id,
@@ -253,6 +274,7 @@ class Storage:
                         json.dumps(agent["args_template"]),
                         json.dumps(agent.get("env", {})),
                         agent.get("persona_id"),
+                        float(agent.get("persona_intensity", 1.0)),
                         ordering,
                     ),
                 )
@@ -299,6 +321,14 @@ class Storage:
                 "SELECT * FROM provider_sessions WHERE session_id = ?",
                 (session_id,),
             ).fetchall()
+            trace_events = conn.execute(
+                """
+                SELECT * FROM trace_events
+                WHERE session_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (session_id,),
+            ).fetchall()
         payload = self._session_summary_from_row(session)
         provider_session_by_agent = {row["agent_id"]: self._provider_session_from_row(row) for row in provider_sessions}
         payload["agents"] = [
@@ -319,6 +349,10 @@ class Storage:
             for row in thread_entries
         ]
         payload["judge_score"] = self._judge_score_from_row(judge_score) if judge_score else None
+        payload["trace_events"] = [
+            {**self._trace_event_from_row(row), "agent_name": agent_names.get(row["agent_id"])}
+            for row in trace_events
+        ]
         return payload
 
     def update_session_status(self, session_id: str, status: str) -> None:
@@ -531,6 +565,49 @@ class Storage:
             "created_at": created_at,
         }
 
+    def add_trace_event(
+        self,
+        *,
+        session_id: str,
+        event_type: str,
+        round_type: str | None = None,
+        round_index: int | None = None,
+        agent_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        trace_event_id = uuid.uuid4().hex
+        created_at = utc_now()
+        event_payload = payload or {}
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO trace_events (
+                    id, session_id, event_type, round_type, round_index, agent_id, payload_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trace_event_id,
+                    session_id,
+                    event_type,
+                    round_type,
+                    round_index,
+                    agent_id,
+                    json.dumps(event_payload),
+                    created_at,
+                ),
+            )
+        return {
+            "id": trace_event_id,
+            "session_id": session_id,
+            "event_type": event_type,
+            "round_type": round_type,
+            "round_index": round_index,
+            "agent_id": agent_id,
+            "payload": event_payload,
+            "created_at": created_at,
+        }
+
     def add_judge_score(
         self,
         *,
@@ -589,6 +666,7 @@ class Storage:
     def _ensure_persona_store(self) -> None:
         self._builtin_dir.mkdir(parents=True, exist_ok=True)
         self._custom_dir.mkdir(parents=True, exist_ok=True)
+        self.persona_icons_dir.mkdir(parents=True, exist_ok=True)
         source_dir = builtin_personas_dir(self._builtin_source_root)
         if source_dir.resolve() == self._builtin_dir.resolve():
             return
@@ -639,29 +717,38 @@ class Storage:
         payload.setdefault("is_selectable", True)
         payload.setdefault("created_at", file_timestamp)
         payload.setdefault("updated_at", payload["created_at"])
-        return payload
+        normalized_payload = self._normalized_persona_payload(payload)
+        if normalized_payload != payload:
+            self._write_persona_payload(normalized_payload)
+        return normalized_payload
 
     def _write_persona_payload(self, payload: dict[str, Any]) -> None:
-        persona_payload = {
-            "id": payload["id"],
-            "name": payload["name"],
-            "philosophy_family": payload["philosophy_family"],
-            "style": payload["style"],
-            "core_values": list(payload.get("core_values", [])),
-            "debate_rules": list(payload.get("debate_rules", [])),
-            "is_builtin": bool(payload.get("is_builtin", False)),
-            "is_user_editable": bool(payload.get("is_user_editable", not payload.get("is_builtin", False))),
-            "is_selectable": bool(payload.get("is_selectable", True)),
-            "created_at": payload.get("created_at", utc_now()),
-            "updated_at": payload.get("updated_at", utc_now()),
-        }
+        persona_payload = self._normalized_persona_payload(
+            {
+                "id": payload["id"],
+                "name": payload["name"],
+                "philosophy_family": payload["philosophy_family"],
+                "style": payload["style"],
+                "core_values": list(payload.get("core_values", [])),
+                "debate_rules": list(payload.get("debate_rules", [])),
+                "icon_path": payload.get("icon_path"),
+                "icon_style_tag": payload.get("icon_style_tag"),
+                "is_builtin": bool(payload.get("is_builtin", False)),
+                "is_user_editable": bool(
+                    payload.get("is_user_editable", not payload.get("is_builtin", False))
+                ),
+                "is_selectable": bool(payload.get("is_selectable", True)),
+                "created_at": payload.get("created_at", utc_now()),
+                "updated_at": payload.get("updated_at", utc_now()),
+            }
+        )
         path = self._persona_path(persona_payload["id"], persona_payload["is_builtin"])
         with self._lock:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(persona_payload, indent=2), encoding="utf-8")
 
     def _persona_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
-        return {
+        return self._normalized_persona_payload({
             "id": row["id"],
             "name": row["name"],
             "philosophy_family": row["philosophy_family"],
@@ -673,7 +760,14 @@ class Storage:
             "is_selectable": bool(row["is_selectable"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
-        }
+        })
+
+    def _normalized_persona_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        persona_payload = dict(payload)
+        icon_path, icon_style_tag = ensure_persona_icon(persona_payload, self.persona_icons_dir)
+        persona_payload["icon_path"] = icon_path
+        persona_payload["icon_style_tag"] = icon_style_tag
+        return persona_payload
 
     def _session_summary_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -700,6 +794,7 @@ class Storage:
             "args_template": json.loads(row["args_template_json"]),
             "env": json.loads(row["env_json"]),
             "persona_id": row["persona_id"],
+            "persona_intensity": float(row["persona_intensity"] if row["persona_intensity"] is not None else 1.0),
             "ordering": row["ordering"],
         }
 
@@ -756,4 +851,16 @@ class Storage:
             "last_error": row["last_error"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+        }
+
+    def _trace_event_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "event_type": row["event_type"],
+            "round_type": row["round_type"],
+            "round_index": row["round_index"],
+            "agent_id": row["agent_id"],
+            "payload": json.loads(row["payload_json"]),
+            "created_at": row["created_at"],
         }

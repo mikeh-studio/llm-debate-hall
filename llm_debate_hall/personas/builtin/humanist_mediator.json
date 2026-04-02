@@ -12,6 +12,8 @@
     "charitably restate opposing views",
     "avoid caricatures"
   ],
+  "icon_path": "/static/assets/persona-icons/builtin/humanist-mediator.svg",
+  "icon_style_tag": "builtin-pixel-creature",
   "is_builtin": true,
   "is_user_editable": false,
   "is_selectable": true,

@@ -111,6 +111,7 @@
             <div class="head-actions">
               <span class="debate-status" id="arena-status">Setup</span>
               <button id="export-session">Export</button>
+              <button id="export-trace">Trace JSON</button>
             </div>
           </div>
           <p class="arena-subtitle" id="arena-subtitle">
@@ -127,6 +128,11 @@
               <button type="button" data-presentation-mode="pixel-stage" aria-pressed="false">Pixel Stage</button>
             </div>
           </div>
+
+          <section class="arena-observability" id="arena-observability">
+            <div class="observability-summary" id="observability-summary"></div>
+            <div class="trace-timeline" id="trace-timeline"></div>
+          </section>
 
           <div class="debate-thread">
             <section class="pixel-stage-shell" id="pixel-stage-shell" hidden aria-label="Pixel Stage presentation">
@@ -168,6 +174,41 @@
                 <h2>Forge A Philosophy</h2>
               </div>
               <button id="save-persona">Save Persona</button>
+            </div>
+            <div class="persona-generator chrome-inline-card">
+              <div class="subhead">
+                <div>
+                  <p class="panel-kicker">Generator</p>
+                  <h3>Describe A Persona</h3>
+                </div>
+                <button id="generate-persona" type="button">Generate Draft</button>
+              </div>
+              <label class="field">
+                <span>Description</span>
+                <textarea id="persona-description" rows="3" placeholder="A cold systems thinker who distrusts hype, prizes incentives, and pushes every claim into operational detail."></textarea>
+              </label>
+              <div class="persona-generator-grid">
+                <label class="field">
+                  <span>Name Hint</span>
+                  <input id="persona-name-hint" placeholder="Systems Skeptic" />
+                </label>
+                <label class="field">
+                  <span>Family Hint</span>
+                  <input id="persona-family-hint" placeholder="Skepticism" />
+                </label>
+              </div>
+              <div class="persona-generator-grid">
+                <label class="field">
+                  <span>Generator Preset</span>
+                  <select id="persona-generator-preset"></select>
+                </label>
+                <label class="field">
+                  <span>Generator Model</span>
+                  <select id="persona-generator-model"></select>
+                </label>
+              </div>
+              <div class="preset-note" id="persona-generator-note"></div>
+              <div class="thread-feedback" id="persona-feedback"></div>
             </div>
             <input id="persona-id" type="hidden" />
             <label class="field">

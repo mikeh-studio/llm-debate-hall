@@ -18,11 +18,15 @@ It is built for a very specific kind of experiment: using the local tools you al
 
 - Arena-style setup for 2 to 5 debaters plus a judge
 - Per-seat model, provider, and persona configuration
+- Persona intensity controls so the same persona can play subtly or aggressively without cloning it
+- Persona draft generation from a freeform description, then save-as-custom in the library
 - Visible auto-persona selection before opening statements
 - Single-paragraph turn flow with pause/continue controls
 - Transcript-first Arena updates with persisted session recovery
 - Persistent per-debater provider threads where supported
 - Replay fallback when a provider cannot resume cleanly
+- Arena observability with per-turn latency, provider/model, fallback state, token estimates, and a timeline
+- Structured trace export for later analysis
 - Local SQLite storage for sessions, messages, and scores
 
 The judge is stateless and evaluates from the stored transcript. Supported provider defaults currently map to `codex exec`, `claude -p`, and `ollama run`. Gemini still needs a manual command override in this build.
@@ -45,7 +49,7 @@ The Arena now includes an alternate Pixel Stage presentation mode that keeps the
 
 Personas remain editable in the app, and the Arena supports a dark theme for longer debate sessions.
 
-![Personas in dark mode](llm_debate_hall/static/personas_dark_mode.png)
+![Personas in dark mode](docs/screenshots/personas_dark_mode.png)
 
 ## Quick Start
 
@@ -71,6 +75,8 @@ PYTHONPYCACHEPREFIX=/tmp/llm-debate-hall-pyc python3 -m compileall llm_debate_ha
 
 For UI or orchestration changes, also test the live app in the browser at `http://127.0.0.1:8000`.
 When validating debate startup, confirm the Arena shows the persona-selection phase or the transcript itself instead of staying blank after `Start Debate`.
+For observability changes, verify the Arena trace timeline and `Trace JSON` export reflect the same session state.
+For persona workflow changes, verify persona generation, icon rendering, and save/edit flows in the Personas view.
 
 ## Live Debate Smoke Test
 

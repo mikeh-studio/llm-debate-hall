@@ -20,6 +20,7 @@ from llm_debate_hall.models import (
     JudgeDecisionRequest,
     ModeratorNoteRequest,
     PersonaCreate,
+    PersonaGenerateRequest,
     PersonaUpdate,
     QuestionRequest,
 )
@@ -48,6 +49,22 @@ def _fallback_suggestions(seed: str) -> list[str]:
         f"What is the strongest argument against {base}?",
         f"How should teams govern decisions involving {base}?",
     ]
+
+
+def _persona_generation_prompt(description: str, name_hint: str | None, family_hint: str | None) -> str:
+    hint_lines = []
+    if name_hint:
+        hint_lines.append(f"NAME_HINT: {name_hint}")
+    if family_hint:
+        hint_lines.append(f"FAMILY_HINT: {family_hint}")
+    hints = "\n".join(hint_lines) or "NO_HINTS"
+    return (
+        "Generate one structured debate persona from the user's description.\n"
+        f"DESCRIPTION: {description}\n"
+        f"{hints}\n"
+        "Return JSON with keys: "
+        '{"name":"...", "philosophy_family":"...", "style":"...", "core_values":["..."], "debate_rules":["..."]}'
+    )
 
 
 def _using_default_invocation(preset_id: str, command: list[str], args_template: list[str]) -> bool:
@@ -122,7 +139,28 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
         allow_headers=["*"],
     )
 
+    app.mount("/persona-icons", StaticFiles(directory=storage.persona_icons_dir), name="persona-icons")
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    async def publish_trace_event(
+        session_id: str,
+        *,
+        event_type: str,
+        round_type: str | None = None,
+        round_index: int | None = None,
+        agent_id: str | None = None,
+        payload: dict | None = None,
+    ) -> dict:
+        event = storage.add_trace_event(
+            session_id=session_id,
+            event_type=event_type,
+            round_type=round_type,
+            round_index=round_index,
+            agent_id=agent_id,
+            payload=payload,
+        )
+        await broker.publish(session_id, {"type": "trace_event_saved", "trace_event": event})
+        return event
 
     @app.get("/")
     async def index() -> FileResponse:
@@ -273,6 +311,69 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/personas/generate")
+    async def generate_persona(payload: PersonaGenerateRequest) -> dict:
+        description = payload.description.strip()
+        if not description:
+            raise HTTPException(status_code=400, detail="Persona description cannot be empty.")
+
+        preset = PRESET_REGISTRY.get(payload.generator.preset_id)
+        if preset is None:
+            raise HTTPException(status_code=400, detail=f"Unknown preset: {payload.generator.preset_id}")
+        command = payload.generator.command or preset.command
+        args_template = payload.generator.args_template or preset.args_template
+        _assert_active_model(
+            preset_id=payload.generator.preset_id,
+            model_name=payload.generator.model_name,
+            command=command,
+            args_template=args_template,
+            env=payload.generator.env,
+        )
+        generator_agent = {
+            "id": "persona-generator",
+            "display_name": payload.generator.display_name,
+            "role": "judge",
+            "side": "system",
+            "preset_id": payload.generator.preset_id,
+            "model_name": payload.generator.model_name,
+            "command": command,
+            "args_template": args_template,
+            "env": payload.generator.env,
+        }
+        adapter = engine.adapter_factory(generator_agent)
+        response = await adapter.generate(
+            AdapterRequest(
+                session_id="persona-generation",
+                agent_id="persona-generator",
+                agent_name=payload.generator.display_name,
+                preset_id=payload.generator.preset_id,
+                role="judge",
+                side="system",
+                topic=description,
+                prompt=_persona_generation_prompt(description, payload.name_hint, payload.philosophy_family_hint),
+                output_mode="persona_generation",
+                model_name=payload.generator.model_name,
+                command=command,
+                args_template=args_template,
+                env=payload.generator.env,
+            ),
+            lambda chunk: asyncio.sleep(0),
+        )
+        parsed = _extract_json(response.raw_text)
+        if parsed is None:
+            raise HTTPException(status_code=400, detail="Persona generator returned invalid JSON.")
+        try:
+            return PersonaCreate(
+                name=str(parsed.get("name", "")).strip(),
+                philosophy_family=str(parsed.get("philosophy_family", "")).strip(),
+                style=str(parsed.get("style", "")).strip(),
+                core_values=[str(item).strip() for item in parsed.get("core_values", []) if str(item).strip()],
+                debate_rules=[str(item).strip() for item in parsed.get("debate_rules", []) if str(item).strip()],
+                is_selectable=True,
+            ).model_dump()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Persona generator returned malformed fields: {exc}") from exc
+
     @app.get("/api/sessions")
     async def list_sessions() -> list[dict]:
         return storage.list_sessions()
@@ -316,6 +417,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
                     "role": "debater",
                     "side": agent.side or "independent",
                     "persona_id": agent.persona_id if agent.persona_mode != "auto" else None,
+                    "persona_intensity": agent.persona_intensity,
                     "preset_id": agent.preset_id,
                     "model_name": agent.model_name,
                     "command": command,
@@ -399,6 +501,16 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             payload={"event": "provider_session_reset", "agent_id": agent_id},
         )
         await broker.publish(session_id, {"type": "thread_entry_saved", "entry": entry})
+        await publish_trace_event(
+            session_id,
+            event_type="provider_session_reset",
+            agent_id=agent_id,
+            payload={
+                "summary": detail,
+                "provider_session_mode": None,
+                "provider_session_status": "reset",
+            },
+        )
         await broker.publish(
             session_id,
             {
@@ -503,6 +615,31 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return JSONResponse(payload)
+
+    @app.get("/api/sessions/{session_id}/trace")
+    async def get_trace(session_id: str) -> dict:
+        try:
+            session = storage.get_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"session_id": session_id, "trace_events": session.get("trace_events", [])}
+
+    @app.get("/api/sessions/{session_id}/trace/export")
+    async def export_trace(session_id: str) -> JSONResponse:
+        try:
+            session = storage.get_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return JSONResponse(
+            {
+                "session_id": session["id"],
+                "topic": session["topic"],
+                "status": session["status"],
+                "created_at": session["created_at"],
+                "updated_at": session["updated_at"],
+                "trace_events": session.get("trace_events", []),
+            }
+        )
 
     @app.websocket("/ws/sessions/{session_id}")
     async def session_ws(websocket: WebSocket, session_id: str) -> None:
