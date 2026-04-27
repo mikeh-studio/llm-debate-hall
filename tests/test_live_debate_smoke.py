@@ -82,8 +82,7 @@ def test_build_attempt_plans_rotates_real_lineups() -> None:
     model_choices = [
         smoke_module.ModelChoice("openai", "gpt-5", "OpenAI CLI"),
         smoke_module.ModelChoice("anthropic", "claude-sonnet-4", "Anthropic CLI"),
-        smoke_module.ModelChoice("ollama", "llama3.1", "Ollama"),
-        smoke_module.ModelChoice("ollama", "qwen2.5", "Ollama"),
+        smoke_module.ModelChoice("openai", "gpt-5-mini", "OpenAI CLI"),
     ]
 
     plans = build_attempt_plans(model_choices, max_attempts=3)
@@ -94,7 +93,7 @@ def test_build_attempt_plans_rotates_real_lineups() -> None:
     third = [(seat.preset_id, seat.model_name) for seat in plans[2].debaters]
     assert first == [("openai", "gpt-5"), ("openai", "gpt-5"), ("openai", "gpt-5")]
     assert second == [("anthropic", "claude-sonnet-4"), ("anthropic", "claude-sonnet-4"), ("anthropic", "claude-sonnet-4")]
-    assert third == [("ollama", "llama3.1"), ("ollama", "llama3.1"), ("ollama", "llama3.1")]
+    assert third == [("openai", "gpt-5-mini"), ("openai", "gpt-5-mini"), ("openai", "gpt-5-mini")]
 
 
 def test_run_live_debate_smoke_retries_until_success(tmp_path: Path, monkeypatch) -> None:
@@ -118,14 +117,6 @@ def test_run_live_debate_smoke_retries_until_success(tmp_path: Path, monkeypatch
                 "active_models": ["claude-sonnet-4"],
                 "model_validation_mode": "validated",
             },
-            {
-                "id": "ollama",
-                "label": "Ollama",
-                "is_available": True,
-                "requires_command_override": False,
-                "active_models": ["llama3.1", "qwen2.5"],
-                "model_validation_mode": "validated",
-            },
         ],
     )
 
@@ -142,7 +133,6 @@ def test_run_live_debate_smoke_retries_until_success(tmp_path: Path, monkeypatch
         lambda preset_id, env=None: {
             "openai": ["gpt-fail"],
             "anthropic": ["claude-sonnet-4"],
-            "ollama": ["llama3.1", "qwen2.5"],
         }.get(preset_id, []),
     )
 

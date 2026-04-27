@@ -20,7 +20,7 @@ DEFAULT_TOPIC = (
 )
 DEFAULT_REPORT_DIR = Path("artifacts/live-debate-smoke")
 DEFAULT_MAX_ATTEMPTS = 5
-ALLOWED_PRESET_IDS = ("openai", "anthropic", "ollama")
+ALLOWED_PRESET_IDS = ("openai", "anthropic")
 PRESET_PRIORITY = {preset_id: index for index, preset_id in enumerate(ALLOWED_PRESET_IDS)}
 DEBATER_BLUEPRINTS = (
     ("Athena", "stoic_rationalist"),
@@ -439,7 +439,7 @@ def run_live_debate_smoke(
     blocker: str | None = None
 
     if not model_choices:
-        blocker = "No validated real providers are available. Expected at least one validated preset from openai, anthropic, or ollama."
+        blocker = "No validated real providers are available. Expected at least one validated preset from openai or anthropic."
         report_path = _report_path(report_dir)
         report_path.write_text(
             _build_report_markdown(topic=topic, attempts=attempts, persona_names={}, blocker=blocker),

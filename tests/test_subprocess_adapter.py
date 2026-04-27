@@ -14,6 +14,7 @@ from llm_debate_hall.adapters.subprocess_adapter import (
     build_codex_exec_command,
     build_codex_resume_command,
     build_invocation_plan,
+    catalog_models,
     probe_active_models,
 )
 
@@ -166,6 +167,7 @@ def test_probe_active_models_reuses_cache_for_empty_env(monkeypatch) -> None:
 
     _PROBE_CACHE.clear()
     monkeypatch.setattr(subprocess_adapter.shutil, "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(subprocess_adapter, "catalog_models", lambda preset, force_refresh=False: [])
     monkeypatch.setattr(
         subprocess_adapter,
         "_probe_codex_model",
@@ -180,6 +182,24 @@ def test_probe_active_models_reuses_cache_for_empty_env(monkeypatch) -> None:
     assert calls == [(model_name, None) for model_name in preset.models]
 
     _PROBE_CACHE.clear()
+
+
+def test_catalog_models_reads_codex_debug_catalog(monkeypatch) -> None:
+    class Completed:
+        returncode = 0
+        stdout = 'warning line\n{"models":[{"slug":"gpt-5.4","visibility":"list"},{"slug":"hidden","visibility":"hidden"},{"slug":"gpt-5.3-codex-spark","visibility":"list"}]}'
+        stderr = ""
+
+    monkeypatch.setattr(subprocess_adapter.shutil, "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(subprocess_adapter.subprocess, "run", lambda *args, **kwargs: Completed())
+    subprocess_adapter._CATALOG_CACHE.clear()
+
+    assert catalog_models(PRESET_REGISTRY["openai"], force_refresh=True) == [
+        "gpt-5.4",
+        "gpt-5.3-codex-spark",
+    ]
+
+    subprocess_adapter._CATALOG_CACHE.clear()
 
 
 def test_generate_times_out_and_kills_subprocess(monkeypatch) -> None:

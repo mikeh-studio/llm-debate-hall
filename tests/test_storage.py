@@ -67,6 +67,9 @@ def test_storage_persona_and_session_roundtrip(tmp_path: Path) -> None:
         },
     )
     assert session["status"] == "draft"
+    assert session["debate_mode"] == "serious"
+    assert session["topic_type"] == "Other"
+    assert session["topic_tags"] == []
     assert len(session["agents"]) == 3
 
     debater = next(agent for agent in session["agents"] if agent["role"] == "debater")
@@ -126,7 +129,80 @@ def test_storage_persona_and_session_roundtrip(tmp_path: Path) -> None:
     exported_debater = next(agent for agent in exported["agents"] if agent["id"] == debater["id"])
     assert exported_debater["provider_session"]["provider_session_id"] == "thread-123"
     assert exported_debater["persona_intensity"] == 1.35
+    assert exported_debater["sentiment"] == "exploratory"
     assert exported["trace_events"][0]["id"] == trace_event["id"]
+
+
+def test_storage_session_metadata_roundtrip(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
+    session = storage.create_session(
+        "Should AI agents run production incident reviews?",
+        [
+            {
+                "display_name": "Athena",
+                "role": "debater",
+                "side": "pro",
+                "sentiment": "affirming",
+                "persona_intensity": 1,
+                "preset_id": "mock",
+                "model_name": "mock-a",
+                "command": ["mock"],
+                "args_template": [],
+                "env": {},
+            },
+            {
+                "display_name": "Burke",
+                "role": "debater",
+                "side": "con",
+                "sentiment": "opposing",
+                "persona_intensity": 1,
+                "preset_id": "mock",
+                "model_name": "mock-b",
+                "command": ["mock"],
+                "args_template": [],
+                "env": {},
+            },
+        ],
+        {
+            "display_name": "Judge",
+            "role": "judge",
+            "side": "judge",
+            "preset_id": "mock",
+            "model_name": "mock-j",
+            "command": ["mock"],
+            "args_template": [],
+            "env": {},
+        },
+        debate_mode="theater",
+        topic_type="AI & Technology",
+        topic_tags=["incident", "agents", "agents"],
+    )
+
+    assert session["debate_mode"] == "theater"
+    assert session["topic_type"] == "AI & Technology"
+    assert session["topic_tags"] == ["incident", "agents"]
+    assert [agent["sentiment"] for agent in session["agents"] if agent["role"] == "debater"] == [
+        "affirming",
+        "opposing",
+    ]
+
+    debater = next(agent for agent in session["agents"] if agent["role"] == "debater")
+    updated = storage.update_session_metadata(
+        session["id"],
+        debate_mode="serious",
+        topic_type="Product",
+        topic_tags=["roadmap"],
+        debater_sentiments={debater["id"]: "skeptical"},
+    )
+
+    assert updated["debate_mode"] == "serious"
+    assert updated["topic_type"] == "Product"
+    assert updated["topic_tags"] == ["roadmap"]
+    updated_debater = next(agent for agent in updated["agents"] if agent["id"] == debater["id"])
+    assert updated_debater["sentiment"] == "skeptical"
+    listed = storage.list_sessions()[0]
+    assert listed["topic_type"] == "Product"
+    assert listed["agents"][0]["sentiment"] == "skeptical"
 
 
 def test_storage_migrates_legacy_db_personas_to_files(tmp_path: Path) -> None:

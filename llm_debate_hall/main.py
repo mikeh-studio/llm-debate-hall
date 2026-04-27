@@ -12,19 +12,24 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from llm_debate_hall.adapters.base import AdapterRequest, PRESET_REGISTRY
-from llm_debate_hall.engine import DebateEngine, active_models_for_preset, visible_presets
+from llm_debate_hall.engine import DebateEngine
+from llm_debate_hall.model_catalog import assert_active_model, model_lookup_payload, visible_presets
 from llm_debate_hall.events import EventBroker
 from llm_debate_hall.models import (
     CreateSessionRequest,
     HumanVoteRequest,
     JudgeDecisionRequest,
+    ModelLookupRequest,
     ModeratorNoteRequest,
     PersonaCreate,
     PersonaGenerateRequest,
     PersonaUpdate,
     QuestionRequest,
+    SessionMetadataUpdate,
+    WorkspaceSuggestionRequest,
 )
 from llm_debate_hall.storage import Storage
+from llm_debate_hall.workspace import suggest_workspace_metadata
 
 
 def _extract_json(text: str) -> dict | None:
@@ -65,53 +70,6 @@ def _persona_generation_prompt(description: str, name_hint: str | None, family_h
         "Return JSON with keys: "
         '{"name":"...", "philosophy_family":"...", "style":"...", "core_values":["..."], "debate_rules":["..."]}'
     )
-
-
-def _using_default_invocation(preset_id: str, command: list[str], args_template: list[str]) -> bool:
-    preset = PRESET_REGISTRY.get(preset_id)
-    if preset is None:
-        return False
-    return command == preset.command and args_template == preset.args_template
-
-
-def _assert_active_model(
-    *,
-    preset_id: str,
-    model_name: str,
-    command: list[str],
-    args_template: list[str],
-    env: dict[str, str],
-) -> None:
-    preset = PRESET_REGISTRY.get(preset_id)
-    if preset is None:
-        raise HTTPException(status_code=400, detail=f"Unknown preset: {preset_id}")
-    if preset.requires_command_override:
-        return
-    if not _using_default_invocation(preset_id, command, args_template):
-        return
-
-    active_models = active_models_for_preset(preset_id, env)
-    if active_models:
-        if model_name in active_models:
-            return
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Model '{model_name}' is not active for preset '{preset_id}'. "
-                f"Use one of: {', '.join(active_models)}."
-            ),
-        )
-    if model_name in preset.models:
-        return
-    if preset.models:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Model '{model_name}' is not configured for preset '{preset_id}'. "
-                f"Use one of: {', '.join(preset.models)}."
-            ),
-        )
-    raise HTTPException(status_code=400, detail=f"No models are configured for preset '{preset_id}'.")
 
 
 def create_app(db_path: str | None = None, personas_root: str | None = None) -> FastAPI:
@@ -178,9 +136,29 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
     async def list_presets() -> list[dict]:
         return visible_presets()
 
+    @app.post("/api/presets/{preset_id}/models")
+    async def lookup_preset_models(preset_id: str, payload: ModelLookupRequest) -> dict:
+        try:
+            return model_lookup_payload(
+                preset_id,
+                command=payload.command,
+                args_template=payload.args_template,
+                env=payload.env,
+                refresh=payload.refresh,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/personas")
     async def list_personas() -> list[dict]:
         return storage.list_personas()
+
+    @app.post("/api/workspace/suggestions")
+    async def workspace_suggestions(payload: WorkspaceSuggestionRequest) -> dict:
+        return suggest_workspace_metadata(
+            payload.topic,
+            [agent.model_dump() for agent in payload.agents],
+        )
 
     @app.post("/api/questions/validate")
     async def validate_question(payload: QuestionRequest) -> dict:
@@ -206,7 +184,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             "args_template": payload.judge.args_template or judge_preset.args_template,
             "env": payload.judge.env,
         }
-        _assert_active_model(
+        assert_active_model(
             preset_id=payload.judge.preset_id,
             model_name=payload.judge.model_name,
             command=judge_agent["command"],
@@ -264,7 +242,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             "args_template": payload.judge.args_template or judge_preset.args_template,
             "env": payload.judge.env,
         }
-        _assert_active_model(
+        assert_active_model(
             preset_id=payload.judge.preset_id,
             model_name=payload.judge.model_name,
             command=judge_agent["command"],
@@ -322,7 +300,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             raise HTTPException(status_code=400, detail=f"Unknown preset: {payload.generator.preset_id}")
         command = payload.generator.command or preset.command
         args_template = payload.generator.args_template or preset.args_template
-        _assert_active_model(
+        assert_active_model(
             preset_id=payload.generator.preset_id,
             model_name=payload.generator.model_name,
             command=command,
@@ -404,7 +382,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
                 raise HTTPException(status_code=400, detail=f"Unknown preset: {agent.preset_id}")
             command = agent.command or preset.command
             args_template = agent.args_template or preset.args_template
-            _assert_active_model(
+            assert_active_model(
                 preset_id=agent.preset_id,
                 model_name=agent.model_name,
                 command=command,
@@ -416,6 +394,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
                     "display_name": agent.display_name,
                     "role": "debater",
                     "side": agent.side or "independent",
+                    "sentiment": agent.sentiment,
                     "persona_id": agent.persona_id if agent.persona_mode != "auto" else None,
                     "persona_intensity": agent.persona_intensity,
                     "preset_id": agent.preset_id,
@@ -430,7 +409,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             raise HTTPException(status_code=400, detail=f"Unknown preset: {payload.judge.preset_id}")
         judge_command = payload.judge.command or judge_preset.command
         judge_args_template = payload.judge.args_template or judge_preset.args_template
-        _assert_active_model(
+        assert_active_model(
             preset_id=payload.judge.preset_id,
             model_name=payload.judge.model_name,
             command=judge_command,
@@ -444,14 +423,31 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
                 "display_name": payload.judge.display_name,
                 "role": "judge",
                 "side": "judge",
+                "sentiment": "mediating",
                 "preset_id": payload.judge.preset_id,
                 "model_name": payload.judge.model_name,
                 "command": judge_command,
                 "args_template": judge_args_template,
                 "env": payload.judge.env,
             },
+            debate_mode=payload.debate_mode,
+            topic_type=payload.topic_type,
+            topic_tags=payload.topic_tags,
         )
         return session
+
+    @app.patch("/api/sessions/{session_id}/metadata")
+    async def update_session_metadata(session_id: str, payload: SessionMetadataUpdate) -> dict:
+        try:
+            return storage.update_session_metadata(
+                session_id,
+                debate_mode=payload.debate_mode,
+                topic_type=payload.topic_type,
+                topic_tags=payload.topic_tags,
+                debater_sentiments=payload.debater_sentiments,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/sessions/{session_id}/start")
     async def start_session(session_id: str) -> dict:
@@ -572,7 +568,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             raise HTTPException(status_code=400, detail=f"Unknown preset: {payload.judge.preset_id}")
         judge_command = payload.judge.command or judge_preset.command
         judge_args_template = payload.judge.args_template or judge_preset.args_template
-        _assert_active_model(
+        assert_active_model(
             preset_id=payload.judge.preset_id,
             model_name=payload.judge.model_name,
             command=judge_command,
