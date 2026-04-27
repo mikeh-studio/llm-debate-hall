@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import llm_debate_hall.engine as engine_module
+import llm_debate_hall.model_catalog as model_catalog
 from llm_debate_hall.adapters.base import AdapterResponse, PersistentAdapterResponse
 from llm_debate_hall.adapters.subprocess_adapter import SubprocessAdapterError
 from llm_debate_hall.engine import DebateEngine
@@ -234,12 +235,13 @@ def test_engine_runs_segment_then_pauses(tmp_path: Path) -> None:
 
 def test_visible_presets_can_expose_mock_backend_for_hosted_demo(monkeypatch) -> None:
     monkeypatch.setenv("LLM_DEBATE_HALL_ENABLE_MOCK_PRESET", "true")
-    monkeypatch.setattr(engine_module.shutil, "which", lambda _: None)
+    monkeypatch.setattr(model_catalog.shutil, "which", lambda _: None)
     monkeypatch.setattr(
-        engine_module,
+        model_catalog,
         "cached_active_models",
-        lambda preset, env=None: ["gpt-5"] if preset.id == "openai" else [],
+        lambda preset: ["gpt-5"] if preset.id == "openai" else [],
     )
+    monkeypatch.setattr(model_catalog, "catalog_models", lambda preset, force_refresh=False: [])
 
     presets = engine_module.visible_presets()
 
@@ -564,15 +566,17 @@ def test_engine_does_not_store_non_dialogue_output_as_message(tmp_path: Path) ->
 
 def test_visible_presets_uses_cached_models_without_live_probe(monkeypatch) -> None:
     monkeypatch.setattr(
-        engine_module,
+        model_catalog,
         "cached_active_models",
         lambda preset: ["gpt-5"] if preset.id == "openai" else None,
     )
     monkeypatch.setattr(
-        engine_module,
+        model_catalog,
         "active_models_for_preset",
-        lambda preset_id, env=None: (_ for _ in ()).throw(AssertionError("live probe should not run")),
+        lambda preset_id, env=None, force_refresh=False: (_ for _ in ()).throw(AssertionError("live probe should not run")),
     )
+    monkeypatch.setattr(model_catalog, "catalog_models", lambda preset, force_refresh=False: [])
+    monkeypatch.setattr(model_catalog, "_provider_auth_error", lambda preset_id, command, env: None)
 
     presets = engine_module.visible_presets()
     openai = next(preset for preset in presets if preset["id"] == "openai")

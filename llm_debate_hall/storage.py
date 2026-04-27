@@ -12,6 +12,15 @@ from typing import Any
 from llm_debate_hall.models import PersonaCreate, PersonaModel, PersonaUpdate
 from llm_debate_hall.persona_icons import ensure_persona_icon, generated_persona_icons_dir
 from llm_debate_hall.personas import builtin_personas_dir, custom_personas_dir, load_persona_payload, personas_root
+from llm_debate_hall.workspace import (
+    DEFAULT_DEBATE_MODE,
+    DEFAULT_SENTIMENT,
+    DEFAULT_TOPIC_TYPE,
+    normalize_debate_mode,
+    normalize_sentiment,
+    normalize_topic_tags,
+    normalize_topic_type,
+)
 
 
 def utc_now() -> str:
@@ -68,6 +77,9 @@ class Storage:
                     id TEXT PRIMARY KEY,
                     topic TEXT NOT NULL,
                     format TEXT NOT NULL,
+                    debate_mode TEXT NOT NULL DEFAULT 'serious',
+                    topic_type TEXT NOT NULL DEFAULT 'Other',
+                    topic_tags_json TEXT NOT NULL DEFAULT '[]',
                     status TEXT NOT NULL,
                     winner_auto TEXT,
                     winner_human TEXT,
@@ -81,6 +93,7 @@ class Storage:
                     display_name TEXT NOT NULL,
                     role TEXT NOT NULL,
                     side TEXT NOT NULL,
+                    sentiment TEXT NOT NULL DEFAULT 'exploratory',
                     preset_id TEXT NOT NULL,
                     model_name TEXT NOT NULL,
                     command_json TEXT NOT NULL,
@@ -164,6 +177,10 @@ class Storage:
                 """
             )
             self._ensure_column(conn, "session_agents", "persona_intensity", "ALTER TABLE session_agents ADD COLUMN persona_intensity REAL NOT NULL DEFAULT 1.0")
+            self._ensure_column(conn, "sessions", "debate_mode", f"ALTER TABLE sessions ADD COLUMN debate_mode TEXT NOT NULL DEFAULT '{DEFAULT_DEBATE_MODE}'")
+            self._ensure_column(conn, "sessions", "topic_type", f"ALTER TABLE sessions ADD COLUMN topic_type TEXT NOT NULL DEFAULT '{DEFAULT_TOPIC_TYPE}'")
+            self._ensure_column(conn, "sessions", "topic_tags_json", "ALTER TABLE sessions ADD COLUMN topic_tags_json TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "session_agents", "sentiment", f"ALTER TABLE session_agents ADD COLUMN sentiment TEXT NOT NULL DEFAULT '{DEFAULT_SENTIMENT}'")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
         columns = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -241,26 +258,47 @@ class Storage:
         )
         return self.get_persona(persona_id)
 
-    def create_session(self, topic: str, agents: list[dict[str, Any]], judge: dict[str, Any]) -> dict[str, Any]:
+    def create_session(
+        self,
+        topic: str,
+        agents: list[dict[str, Any]],
+        judge: dict[str, Any],
+        *,
+        debate_mode: str = DEFAULT_DEBATE_MODE,
+        topic_type: str = DEFAULT_TOPIC_TYPE,
+        topic_tags: list[str] | None = None,
+    ) -> dict[str, Any]:
         session_id = uuid.uuid4().hex
         now = utc_now()
+        normalized_topic_tags = normalize_topic_tags(topic_tags)
         with self._lock, self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO sessions (id, topic, format, status, created_at, updated_at)
-                VALUES (?, ?, 'structured_v1', 'draft', ?, ?)
+                INSERT INTO sessions (
+                    id, topic, format, debate_mode, topic_type, topic_tags_json,
+                    status, created_at, updated_at
+                )
+                VALUES (?, ?, 'structured_v1', ?, ?, ?, 'draft', ?, ?)
                 """,
-                (session_id, topic, now, now),
+                (
+                    session_id,
+                    topic,
+                    normalize_debate_mode(debate_mode),
+                    normalize_topic_type(topic_type),
+                    json.dumps(normalized_topic_tags),
+                    now,
+                    now,
+                ),
             )
             for ordering, agent in enumerate([*agents, judge]):
                 agent_id = uuid.uuid4().hex
                 conn.execute(
                     """
                     INSERT INTO session_agents (
-                        id, session_id, display_name, role, side, preset_id, model_name,
+                        id, session_id, display_name, role, side, sentiment, preset_id, model_name,
                         command_json, args_template_json, env_json, persona_id, persona_intensity, ordering
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         agent_id,
@@ -268,6 +306,7 @@ class Storage:
                         agent["display_name"],
                         agent["role"],
                         agent["side"],
+                        normalize_sentiment(agent.get("sentiment")),
                         agent["preset_id"],
                         agent["model_name"],
                         json.dumps(agent["command"]),
@@ -280,12 +319,63 @@ class Storage:
                 )
         return self.get_session(session_id)
 
+    def update_session_metadata(
+        self,
+        session_id: str,
+        *,
+        debate_mode: str | None = None,
+        topic_type: str | None = None,
+        topic_tags: list[str] | None = None,
+        debater_sentiments: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown session: {session_id}")
+            next_mode = normalize_debate_mode(debate_mode) if debate_mode is not None else row["debate_mode"]
+            next_topic_type = normalize_topic_type(topic_type) if topic_type is not None else row["topic_type"]
+            next_topic_tags = (
+                json.dumps(normalize_topic_tags(topic_tags))
+                if topic_tags is not None
+                else row["topic_tags_json"]
+            )
+            conn.execute(
+                """
+                UPDATE sessions
+                SET debate_mode = ?, topic_type = ?, topic_tags_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (next_mode, next_topic_type, next_topic_tags, utc_now(), session_id),
+            )
+            for agent_id, sentiment in (debater_sentiments or {}).items():
+                conn.execute(
+                    """
+                    UPDATE session_agents
+                    SET sentiment = ?
+                    WHERE id = ? AND session_id = ? AND role = 'debater'
+                    """,
+                    (normalize_sentiment(sentiment), agent_id, session_id),
+                )
+        return self.get_session(session_id)
+
     def list_sessions(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             sessions = conn.execute(
                 "SELECT * FROM sessions ORDER BY updated_at DESC, created_at DESC"
             ).fetchall()
-        return [self._session_summary_from_row(row) for row in sessions]
+            agents = conn.execute(
+                "SELECT * FROM session_agents ORDER BY session_id ASC, ordering ASC"
+            ).fetchall()
+        agents_by_session: dict[str, list[dict[str, Any]]] = {}
+        for row in agents:
+            agents_by_session.setdefault(row["session_id"], []).append(self._agent_from_row(row))
+        return [
+            {
+                **self._session_summary_from_row(row),
+                "agents": agents_by_session.get(row["id"], []),
+            }
+            for row in sessions
+        ]
 
     def get_session(self, session_id: str) -> dict[str, Any]:
         with self._connect() as conn:
@@ -774,6 +864,9 @@ class Storage:
             "id": row["id"],
             "topic": row["topic"],
             "format": row["format"],
+            "debate_mode": normalize_debate_mode(row["debate_mode"]),
+            "topic_type": normalize_topic_type(row["topic_type"]),
+            "topic_tags": normalize_topic_tags(json.loads(row["topic_tags_json"] or "[]")),
             "status": row["status"],
             "winner_auto": row["winner_auto"],
             "winner_human": row["winner_human"],
@@ -788,6 +881,7 @@ class Storage:
             "display_name": row["display_name"],
             "role": row["role"],
             "side": row["side"],
+            "sentiment": normalize_sentiment(row["sentiment"]),
             "preset_id": row["preset_id"],
             "model_name": row["model_name"],
             "command": json.loads(row["command_json"]),

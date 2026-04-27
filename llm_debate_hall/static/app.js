@@ -1,5 +1,20 @@
 const SAMPLE_NAMES = ["Athena", "Burke", "Cassius", "Diotima", "Erasmus"];
-const SAMPLE_PRESETS = ["openai", "anthropic", "openai", "anthropic", "ollama"];
+const SAMPLE_PRESETS = ["openai", "anthropic", "openai", "anthropic", "gemini"];
+const DEBATE_MODES = [
+  { value: "theater", label: "Theater & Delight" },
+  { value: "serious", label: "Serious Analysis" },
+];
+const TOPIC_TYPES = ["AI & Technology", "Policy", "Ethics", "Product", "Science", "Culture", "Other"];
+const SENTIMENTS = ["affirming", "opposing", "skeptical", "exploratory", "mediating"];
+const ARENA_PHASES = [
+  { id: "setup", label: "Setup" },
+  { id: "personas", label: "Personas" },
+  { id: "opening", label: "Opening" },
+  { id: "replies", label: "Replies" },
+  { id: "continue", label: "Continue" },
+  { id: "judging", label: "Judging" },
+  { id: "complete", label: "Complete" },
+];
 const DEFAULT_PERSONA_IDS = [
   "stoic_rationalist",
   "pragmatic_engineer",
@@ -15,6 +30,8 @@ const SESSION_SYNC_INTERVAL_MS = 250;
 
 const state = {
   presets: [],
+  modelLookups: {},
+  modelLookupTimers: {},
   personas: [],
   sessions: [],
   activeView: "setup",
@@ -35,6 +52,14 @@ const state = {
   popoverMode: null,
   popoverSeatId: null,
   presentationMode: "classic",
+  topicTypeTouched: false,
+  lastSuggestedTopicType: "Other",
+  sessionFilters: {
+    search: "",
+    debateMode: "",
+    topicType: "",
+    status: "",
+  },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -74,11 +99,98 @@ function parseJsonObject(value) {
   return parsed;
 }
 
+function parseJsonArrayQuiet(value) {
+  try {
+    return { ok: true, value: parseJsonArray(value || "") };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+function parseJsonObjectQuiet(value) {
+  try {
+    return { ok: true, value: parseJsonObject(value || "") };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
 function parseCsv(value) {
   return value
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function uniqueCsv(value) {
+  const seen = new Set();
+  return parseCsv(value)
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 8);
+}
+
+function titleCase(value) {
+  return String(value || "")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function debateModeLabel(value) {
+  return DEBATE_MODES.find((mode) => mode.value === value)?.label || "Serious Analysis";
+}
+
+function sentimentLabel(value) {
+  return titleCase(SENTIMENTS.includes(value) ? value : "exploratory");
+}
+
+function normalizeTopicType(value) {
+  return TOPIC_TYPES.find((topicType) => topicType.toLowerCase() === String(value || "").toLowerCase()) || "Other";
+}
+
+function suggestTopicType(topic) {
+  const text = String(topic || "").toLowerCase();
+  const checks = [
+    ["AI & Technology", ["ai", "agent", "llm", "model", "software", "coding", "automation", "robot"]],
+    ["Policy", ["law", "regulation", "government", "policy", "election", "tax", "public"]],
+    ["Ethics", ["should", "moral", "ethical", "rights", "fair", "harm", "safety", "deception"]],
+    ["Product", ["product", "startup", "market", "customer", "feature", "pricing", "growth"]],
+    ["Science", ["science", "research", "study", "climate", "biology", "physics", "medicine"]],
+    ["Culture", ["culture", "art", "media", "school", "education", "society", "work"]],
+  ];
+  return checks.find(([, keywords]) => keywords.some((keyword) => text.includes(keyword)))?.[0] || "Other";
+}
+
+function suggestSentimentForSeat(seat, index = 0) {
+  const personaText = String(seat.persona_choice || "").toLowerCase();
+  if (personaText.includes("skeptic") || personaText.includes("historian") || personaText.includes("iconoclast")) {
+    return "skeptical";
+  }
+  if (personaText.includes("mediator") || personaText.includes("humanist")) return "mediating";
+  if (index === 0) return "affirming";
+  if (index === 1) return "opposing";
+  return "exploratory";
+}
+
+function topicTypeOptions(selectedValue = "Other", includeAll = false) {
+  const options = includeAll ? ['<option value="">All topic types</option>'] : [];
+  TOPIC_TYPES.forEach((topicType) => {
+    options.push(
+      `<option value="${escapeHtml(topicType)}" ${topicType === selectedValue ? "selected" : ""}>${escapeHtml(topicType)}</option>`
+    );
+  });
+  return options.join("");
+}
+
+function sentimentOptions(selectedValue = "exploratory") {
+  return SENTIMENTS.map(
+    (sentiment) =>
+      `<option value="${escapeHtml(sentiment)}" ${sentiment === selectedValue ? "selected" : ""}>${escapeHtml(sentimentLabel(sentiment))}</option>`
+  ).join("");
 }
 
 function clampPersonaIntensity(value) {
@@ -137,12 +249,17 @@ function persistDraft() {
     judge: {
       name: $("judge-name")?.value ?? "",
       preset_id: $("judge-preset")?.value ?? "",
-      model_name: $("judge-model")?.value ?? "",
+      model_name: currentJudgeModelValue(),
       command: $("judge-command")?.value ?? "",
       args: $("judge-args")?.value ?? "",
       env: $("judge-env")?.value ?? "",
     },
     composer: $("main-composer")?.value ?? "",
+    workspace: {
+      debate_mode: $("debate-mode")?.value ?? "serious",
+      topic_type: $("topic-type")?.value ?? "Other",
+      topic_tags: $("topic-tags")?.value ?? "",
+    },
   };
   window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(payload));
 }
@@ -158,6 +275,10 @@ function restoreDraft() {
       model_name: normalizedModelForPreset(seat.preset_id || defaultSeatPresetId(index), seat.model_name || ""),
       persona_choice: seat.persona_choice || defaultPersonaChoiceForSeat(index),
       persona_intensity: clampPersonaIntensity(seat.persona_intensity),
+      sentiment: SENTIMENTS.includes(seat.sentiment) ? seat.sentiment : suggestSentimentForSeat(seat, index),
+      suggested_sentiment: SENTIMENTS.includes(seat.suggested_sentiment)
+        ? seat.suggested_sentiment
+        : suggestSentimentForSeat(seat, index),
       command: seat.command || "",
       args_template: seat.args_template || "",
       env_json: seat.env_json || "",
@@ -166,12 +287,19 @@ function restoreDraft() {
   if (draft.judge) {
     $("judge-name").value = draft.judge.name || "Solon";
     $("judge-preset").value = draft.judge.preset_id || preferredPresetId();
-    $("judge-model").dataset.value = normalizedModelForPreset($("judge-preset").value, draft.judge.model_name || "");
+    setJudgeModelValue(normalizedModelForPreset($("judge-preset").value, draft.judge.model_name || ""));
     $("judge-command").value = draft.judge.command || "";
     $("judge-args").value = draft.judge.args || "";
     $("judge-env").value = draft.judge.env || "";
   }
   $("main-composer").value = draft.composer || "";
+  if (draft.workspace) {
+    $("debate-mode").value = draft.workspace.debate_mode || "serious";
+    $("topic-type").value = normalizeTopicType(draft.workspace.topic_type);
+    $("topic-tags").value = draft.workspace.topic_tags || "";
+    state.lastSuggestedTopicType = suggestTopicType($("main-composer").value);
+    state.topicTypeTouched = $("topic-type").value !== state.lastSuggestedTopicType;
+  }
   return true;
 }
 
@@ -213,8 +341,92 @@ function presetById(presetId) {
   return state.presets.find((preset) => preset.id === presetId) || null;
 }
 
+function modelLookupKey(presetId, config = {}) {
+  return JSON.stringify({
+    preset_id: presetId || "",
+    command: config.command || null,
+    args_template: config.args_template || null,
+    env: config.env || {},
+  });
+}
+
+function baseModelLookup(presetId) {
+  const preset = presetById(presetId);
+  return {
+    active_models: preset?.active_models || [],
+    default_model: preset?.default_model || null,
+    validated_models: preset?.validated_models || [],
+    model_validation_mode: preset?.model_validation_mode || "unavailable",
+    is_available: preset?.is_available,
+    missing_env_vars: preset?.missing_env_vars || [],
+    manual_model_entry: Boolean(preset?.requires_command_override),
+    provider_auth_error: preset?.provider_auth_error || "",
+    provider_ready: preset?.provider_ready,
+  };
+}
+
+function modelLookupForConfig(presetId, config = {}) {
+  return state.modelLookups[modelLookupKey(presetId, config)] || baseModelLookup(presetId);
+}
+
+function modelConfigFromSeat(seat) {
+  const command = parseJsonArrayQuiet(seat.command || "");
+  const args = parseJsonArrayQuiet(seat.args_template || "");
+  const env = parseJsonObjectQuiet(seat.env_json || "");
+  if (!command.ok || !args.ok || !env.ok) {
+    return { ok: false, error: "Advanced backend settings contain invalid JSON." };
+  }
+  return {
+    ok: true,
+    value: {
+      command: command.value,
+      args_template: args.value,
+      env: env.value,
+    },
+  };
+}
+
+function modelConfigFromJudge() {
+  const command = parseJsonArrayQuiet($("judge-command")?.value || "");
+  const args = parseJsonArrayQuiet($("judge-args")?.value || "");
+  const env = parseJsonObjectQuiet($("judge-env")?.value || "");
+  if (!command.ok || !args.ok || !env.ok) {
+    return { ok: false, error: "Judge backend settings contain invalid JSON." };
+  }
+  return {
+    ok: true,
+    value: {
+      command: command.value,
+      args_template: args.value,
+      env: env.value,
+    },
+  };
+}
+
+function modelLookupForSeat(seat) {
+  const config = modelConfigFromSeat(seat);
+  if (!config.ok) return { ...baseModelLookup(seat.preset_id), lookup_error: config.error };
+  return modelLookupForConfig(seat.preset_id, config.value);
+}
+
+function modelLookupForJudge() {
+  const presetId = $("judge-preset")?.value || preferredPresetId();
+  const config = modelConfigFromJudge();
+  if (!config.ok) return { ...baseModelLookup(presetId), lookup_error: config.error };
+  return modelLookupForConfig(presetId, config.value);
+}
+
+function shouldUseManualModelInput(lookup) {
+  return Boolean(
+    lookup.manual_model_entry ||
+    lookup.lookup_error ||
+    lookup.provider_auth_error ||
+    !(lookup.active_models || []).length
+  );
+}
+
 function activeModelsForPreset(presetId) {
-  return presetById(presetId)?.active_models || [];
+  return modelLookupForConfig(presetId).active_models || [];
 }
 
 function verifiedPresetIds() {
@@ -231,7 +443,7 @@ function verifiedPresetIds() {
 
 function preferredPresetId() {
   const verified = verifiedPresetIds();
-  return verified.find((presetId) => ["openai", "anthropic", "ollama"].includes(presetId)) || verified[0] || state.presets[0]?.id || "";
+  return verified.find((presetId) => ["openai", "anthropic"].includes(presetId)) || verified[0] || state.presets[0]?.id || "";
 }
 
 function defaultSeatPresetId(index = 0) {
@@ -241,22 +453,31 @@ function defaultSeatPresetId(index = 0) {
   return verified[index % Math.max(verified.length, 1)] || state.presets[0]?.id || "";
 }
 
-function presetNoteText(presetId) {
+function presetNoteText(presetId, lookup = modelLookupForConfig(presetId)) {
   const preset = presetById(presetId);
   if (!preset) return "";
-  if ((preset.missing_env_vars || []).length) {
-    return `${preset.description} Missing env: ${preset.missing_env_vars.join(", ")}. Add them below as JSON if needed.`;
+  if (lookup.lookup_error) return `${preset.description} ${lookup.lookup_error}`;
+  if (lookup.is_loading) return `${preset.description} Checking local models for this configuration...`;
+  if (lookup.provider_auth_error) return `${preset.description} ${lookup.provider_auth_error}`;
+  if ((lookup.missing_env_vars || []).length) {
+    return `${preset.description} Missing env: ${lookup.missing_env_vars.join(", ")}. Add them below as JSON if needed.`;
   }
-  if (preset.model_validation_mode === "fallback" && preset.is_available === false) {
+  if (lookup.manual_model_entry) {
+    return `${preset.description} Model names are entered manually for this backend configuration.`;
+  }
+  if (lookup.model_validation_mode === "fallback" && lookup.is_available === false) {
     return `${preset.description} This CLI is not installed locally, so the selector is using the preset's built-in model list until the CLI is available.`;
   }
-  if (preset.is_available === false) {
+  if (lookup.is_available === false) {
     return `${preset.description} This CLI is not installed locally on this machine.`;
   }
-  if (preset.model_validation_mode === "fallback") {
+  if (lookup.model_validation_mode === "fallback") {
     return `${preset.description} Live model validation did not succeed here, so the preset is using its built-in fallback model list.`;
   }
-  if (!(preset.active_models || []).length && !preset.requires_command_override) {
+  if (lookup.model_validation_mode === "catalog") {
+    return `${preset.description} Models are loaded from the local CLI catalog.`;
+  }
+  if (!(lookup.active_models || []).length && !preset.requires_command_override) {
     return `${preset.description} No models are currently selectable for this preset.`;
   }
   return preset.requires_command_override
@@ -264,8 +485,8 @@ function presetNoteText(presetId) {
     : preset.description;
 }
 
-function modelOptions(presetId, selectedModel = "") {
-  const models = activeModelsForPreset(presetId);
+function modelOptions(presetId, selectedModel = "", lookup = modelLookupForConfig(presetId)) {
+  const models = lookup.active_models || [];
   if (!models.length) return '<option value="">No active models available</option>';
   return models
     .map(
@@ -275,12 +496,132 @@ function modelOptions(presetId, selectedModel = "") {
     .join("");
 }
 
-function defaultModelForPreset(presetId) {
-  return presetById(presetId)?.default_model || activeModelsForPreset(presetId)[0] || "";
+function defaultModelForPreset(presetId, lookup = modelLookupForConfig(presetId)) {
+  return lookup.default_model || activeModelsForPreset(presetId)[0] || "";
 }
 
-function normalizedModelForPreset(presetId, requestedModel = "") {
-  return activeModelsForPreset(presetId).includes(requestedModel) ? requestedModel : defaultModelForPreset(presetId);
+function normalizedModelForPreset(presetId, requestedModel = "", lookup = modelLookupForConfig(presetId)) {
+  const models = lookup.active_models || [];
+  if (shouldUseManualModelInput(lookup)) return requestedModel || defaultModelForPreset(presetId, lookup);
+  return models.includes(requestedModel) ? requestedModel : defaultModelForPreset(presetId, lookup);
+}
+
+async function refreshModelLookup(presetId, config = {}, options = {}) {
+  if (!presetId) return baseModelLookup(presetId);
+  const key = modelLookupKey(presetId, config);
+  const existing = modelLookupForConfig(presetId, config);
+  state.modelLookups[key] = { ...existing, is_loading: true, lookup_error: "" };
+  const lookup = await fetchJson(`/api/presets/${encodeURIComponent(presetId)}/models`, {
+    method: "POST",
+    body: JSON.stringify({
+      command: config.command,
+      args_template: config.args_template,
+      env: config.env || {},
+      refresh: options.refresh !== false,
+    }),
+  });
+  state.modelLookups[key] = { ...lookup, is_loading: false, lookup_error: "" };
+  return state.modelLookups[key];
+}
+
+async function refreshSeatModelLookup(seat, options = {}) {
+  const config = modelConfigFromSeat(seat);
+  if (!config.ok) return { ...baseModelLookup(seat.preset_id), lookup_error: config.error };
+  const lookup = await refreshModelLookup(seat.preset_id, config.value, options);
+  if (!seat.model_name || (!(lookup.active_models || []).includes(seat.model_name) && !shouldUseManualModelInput(lookup))) {
+    seat.model_name = defaultModelForPreset(seat.preset_id, lookup);
+  }
+  return lookup;
+}
+
+async function refreshSeatModelsNow(seat) {
+  const refresh = refreshSeatModelLookup(seat, { refresh: true });
+  renderArena();
+  await refresh;
+  persistDraft();
+  renderArena();
+}
+
+async function refreshJudgeModelLookup(options = {}) {
+  const presetId = $("judge-preset").value || preferredPresetId();
+  const config = modelConfigFromJudge();
+  if (!config.ok) return { ...baseModelLookup(presetId), lookup_error: config.error };
+  const lookup = await refreshModelLookup(presetId, config.value, options);
+  const currentValue = currentJudgeModelValue();
+  if (!currentValue || (!(lookup.active_models || []).includes(currentValue) && !shouldUseManualModelInput(lookup))) {
+    setJudgeModelValue(defaultModelForPreset(presetId, lookup));
+  }
+  return lookup;
+}
+
+async function refreshJudgeModelsNow() {
+  const refresh = refreshJudgeModelLookup({ refresh: true });
+  renderJudgeModelDropdown();
+  await refresh;
+  persistDraft();
+  renderJudgeModelDropdown();
+  renderParticipantStrip();
+}
+
+async function refreshPersonaGeneratorModelLookup(options = {}) {
+  const presetId = $("persona-generator-preset").value || preferredPresetId();
+  const lookup = await refreshModelLookup(presetId, {}, options);
+  const currentValue = currentPersonaGeneratorModelValue();
+  if (!currentValue || (!(lookup.active_models || []).includes(currentValue) && !shouldUseManualModelInput(lookup))) {
+    setPersonaGeneratorModelValue(defaultModelForPreset(presetId, lookup));
+  }
+  return lookup;
+}
+
+async function refreshPersonaGeneratorModelsNow() {
+  const refresh = refreshPersonaGeneratorModelLookup({ refresh: true });
+  renderPersonaGeneratorModelDropdown();
+  await refresh;
+  renderPersonaGeneratorModelDropdown();
+}
+
+async function refreshAllModelLookups() {
+  await Promise.all([
+    ...state.seatConfigs.map((seat) => refreshSeatModelLookup(seat)),
+    refreshJudgeModelLookup(),
+    refreshPersonaGeneratorModelLookup(),
+  ]);
+}
+
+function scheduleSeatModelLookup(seat) {
+  window.clearTimeout(state.modelLookupTimers[seat.id]);
+  state.modelLookupTimers[seat.id] = window.setTimeout(() => {
+    refreshSeatModelLookup(seat).then(() => {
+      persistDraft();
+      renderArena();
+    }).catch((error) => {
+      console.error(error);
+      setArenaFeedback(error.message || "Could not refresh debater models.", "error");
+      renderArena();
+    });
+  }, 400);
+}
+
+function currentJudgeModelValue() {
+  return $("judge-model-manual")?.hidden ? $("judge-model").value : $("judge-model-manual").value;
+}
+
+function setJudgeModelValue(value) {
+  $("judge-model").dataset.value = value || "";
+  $("judge-model").value = value || "";
+  $("judge-model-manual").value = value || "";
+}
+
+function currentPersonaGeneratorModelValue() {
+  return $("persona-generator-model-manual")?.hidden
+    ? $("persona-generator-model").value
+    : $("persona-generator-model-manual").value;
+}
+
+function setPersonaGeneratorModelValue(value) {
+  $("persona-generator-model").dataset.value = value || "";
+  $("persona-generator-model").value = value || "";
+  $("persona-generator-model-manual").value = value || "";
 }
 
 function buildSeatConfig(index = 0) {
@@ -292,6 +633,8 @@ function buildSeatConfig(index = 0) {
     model_name: defaultModelForPreset(presetId),
     persona_choice: defaultPersonaChoiceForSeat(index),
     persona_intensity: 1,
+    sentiment: index === 0 ? "affirming" : index === 1 ? "opposing" : "exploratory",
+    suggested_sentiment: index === 0 ? "affirming" : index === 1 ? "opposing" : "exploratory",
     command: "",
     args_template: "",
     env_json: "",
@@ -310,8 +653,10 @@ function currentDebaters() {
     id: seat.id,
     display_name: seat.display_name || `Debater ${index + 1}`,
     preset_id: seat.preset_id,
-    model_name: seat.model_name || defaultModelForPreset(seat.preset_id),
+    model_name: seat.model_name || defaultModelForPreset(seat.preset_id, modelLookupForSeat(seat)),
     persona_id: seat.persona_choice === "auto" ? null : seat.persona_choice,
+    persona_intensity: clampPersonaIntensity(seat.persona_intensity),
+    sentiment: SENTIMENTS.includes(seat.sentiment) ? seat.sentiment : "exploratory",
   }));
 }
 
@@ -322,7 +667,7 @@ function currentJudge() {
   return {
     display_name: $("judge-name").value.trim() || "Judge",
     preset_id: $("judge-preset").value || preferredPresetId(),
-    model_name: $("judge-model").value || defaultModelForPreset($("judge-preset").value),
+    model_name: currentJudgeModelValue() || defaultModelForPreset($("judge-preset").value, modelLookupForJudge()),
   };
 }
 
@@ -356,7 +701,7 @@ function renderArenaHeader() {
   $("arena-topic").textContent = topic;
   $("arena-status").textContent = label;
   $("arena-subtitle").textContent = state.activeSession
-    ? "A structured multi-agent debate rendered as one continuous transcript."
+    ? `${debateModeLabel(state.activeSession.debate_mode)} · ${state.activeSession.topic_type || "Other"}`
     : "Configure debaters in Setup, then start the debate.";
   const sessionPill = $("active-session-pill");
   if (sessionPill) sessionPill.textContent = state.activeSession ? `${topic} · ${label}` : "";
@@ -368,8 +713,102 @@ function renderArenaHeader() {
   }
 }
 
+function currentArenaPhase() {
+  if (state.startInFlight && !state.activeSession) return "opening";
+  if (!state.activeSession) return "setup";
+  const status = state.activeSession.status;
+  if (status === "selecting_personas") return "personas";
+  if (status === "awaiting_continue") return "continue";
+  if (status === "awaiting_winner") return "judging";
+  if (status === "completed") return "complete";
+  if (status === "failed") return "complete";
+  if (state.pendingThreadEntry?.kind === "judge") return "judging";
+  const latestRound = [...(state.activeSession.rounds || [])].sort((a, b) => b.round_index - a.round_index)[0];
+  if (!latestRound) return status === "running" ? "opening" : "setup";
+  return latestRound.round_type === "opening" ? "opening" : "replies";
+}
+
+function phaseIndex(phaseId) {
+  return ARENA_PHASES.findIndex((phase) => phase.id === phaseId);
+}
+
+function renderArenaPhaseRail() {
+  const rail = $("arena-phase-rail");
+  if (!rail) return;
+  const activePhase = currentArenaPhase();
+  const activeIndex = phaseIndex(activePhase);
+  rail.innerHTML = ARENA_PHASES.map((phase, index) => {
+    const complete = index < activeIndex || activePhase === "complete";
+    const active = phase.id === activePhase;
+    return `
+      <div class="arena-phase ${active ? "is-active" : ""} ${complete ? "is-complete" : ""}">
+        <span class="arena-phase-dot"></span>
+        <span>${escapeHtml(phase.label)}</span>
+      </div>
+    `;
+  }).join("");
+}
+
+function applyArenaMotionState() {
+  const arena = document.querySelector(".debate-mockup");
+  if (!arena) return;
+  const phase = currentArenaPhase();
+  arena.classList.toggle("is-opening", state.startInFlight && !state.activeSession);
+  arena.classList.toggle("is-live", ["personas", "opening", "replies", "continue", "judging"].includes(phase));
+  arena.classList.toggle("is-resolved", phase === "complete");
+}
+
+function currentSpeakerEntry() {
+  syncPredictedPendingEntry();
+  if (state.pendingThreadEntry && ["agent", "judge"].includes(state.pendingThreadEntry.kind)) {
+    return state.pendingThreadEntry;
+  }
+  return [...state.threadEntries].reverse().find((entry) => ["agent", "judge"].includes(entry.kind)) || null;
+}
+
+function currentSpeakerId() {
+  const entry = currentSpeakerEntry();
+  if (!entry) return "";
+  if (entry.kind === "judge") return "judge";
+  return entry.agent_id || "";
+}
+
+function renderLiveSpeakerStrip() {
+  const strip = $("live-speaker-strip");
+  if (!strip) return;
+  if (!state.activeSession && !state.startInFlight) {
+    strip.innerHTML = `
+      <div class="live-speaker-card is-idle">
+        <span class="live-speaker-kicker">Chamber idle</span>
+        <strong>Assemble the lineup, then open the debate.</strong>
+      </div>
+    `;
+    return;
+  }
+
+  const entry = currentSpeakerEntry();
+  const phase = ARENA_PHASES.find((item) => item.id === currentArenaPhase())?.label || "Arena";
+  const isThinking = Boolean(entry?.pending && !String(entry.display_text || "").trim());
+  const speakerName = entry?.display_name || (state.startInFlight ? "Debate Hall" : "Waiting for speaker");
+  const speakerRole = entry ? threadEntryRoleLabel(entry) : phase;
+  const preview = entry?.display_text
+    ? truncateStageBubble(entry.display_text, 110)
+    : state.startInFlight
+      ? "Opening the chamber..."
+      : "The next speaker is getting ready.";
+  strip.innerHTML = `
+    <div class="live-speaker-card ${entry?.pending || state.startInFlight ? "is-live" : ""}">
+      <span class="live-speaker-kicker">${escapeHtml(phase)}</span>
+      <strong>${escapeHtml(speakerName)}</strong>
+      <span>${escapeHtml(speakerRole)}</span>
+      <div class="live-speaker-preview">${isThinking ? thinkingDotsMarkup(`${speakerName} is thinking`) : escapeHtml(preview)}</div>
+    </div>
+  `;
+}
+
 function renderParticipantStrip() {
   const judge = currentJudge();
+  const speakerId = currentSpeakerId();
   const participants = [
     ...currentDebaters().map(
       (seat) => {
@@ -378,15 +817,15 @@ function renderParticipantStrip() {
             ? " · reset session available"
             : "";
         return `
-        <div class="participant-chip debater" data-seat-id="${escapeHtml(seat.id)}" role="button" tabindex="0">
+        <div class="participant-chip debater ${speakerId === seat.id ? "is-active-speaker" : ""}" data-seat-id="${escapeHtml(seat.id)}" role="button" tabindex="0">
           <strong>${escapeHtml(seat.display_name)}</strong>
-          <span>${escapeHtml((seat.model_name || "No model") + " · " + personaLabel(seat.persona_id) + " · " + personaIntensityLabel(seat.persona_intensity) + sessionStatusNote)}</span>
+          <span>${escapeHtml((seat.model_name || "No model") + " · " + personaLabel(seat.persona_id) + " · " + sentimentLabel(seat.sentiment) + " · " + personaIntensityLabel(seat.persona_intensity) + sessionStatusNote)}</span>
         </div>
       `;
       }
     ),
     `
-      <div class="participant-chip judge" data-role="judge" role="button" tabindex="0">
+      <div class="participant-chip judge ${speakerId === "judge" ? "is-active-speaker" : ""}" data-role="judge" role="button" tabindex="0">
         <strong>${escapeHtml(judge.display_name)}</strong>
         <span>Judge · ${escapeHtml(judge.model_name || "No model")}</span>
       </div>
@@ -409,6 +848,40 @@ function renderSuggestionList() {
         `<button class="suggestion-chip" data-suggestion="${escapeHtml(suggestion)}">${escapeHtml(suggestion)}</button>`
     )
     .join("");
+}
+
+function renderWorkspaceControls() {
+  const topicType = $("topic-type");
+  const sessionTopicFilter = $("session-topic-filter");
+  if (topicType) {
+    const selected = normalizeTopicType(topicType.value || state.lastSuggestedTopicType);
+    topicType.innerHTML = topicTypeOptions(selected);
+    topicType.value = selected;
+  }
+  if (sessionTopicFilter) {
+    sessionTopicFilter.innerHTML = topicTypeOptions(state.sessionFilters.topicType || "", true);
+    sessionTopicFilter.value = state.sessionFilters.topicType;
+  }
+}
+
+function maybeSuggestWorkspaceMetadata({ force = false } = {}) {
+  if (state.activeSession) return;
+  const topicType = $("topic-type");
+  if (!topicType) return;
+  const suggested = suggestTopicType($("main-composer")?.value || "");
+  const shouldApply = force || !state.topicTypeTouched || topicType.value === state.lastSuggestedTopicType;
+  state.lastSuggestedTopicType = suggested;
+  if (shouldApply) {
+    topicType.value = suggested;
+    state.topicTypeTouched = false;
+  }
+  state.seatConfigs = state.seatConfigs.map((seat, index) => {
+    const suggestedSentiment = suggestSentimentForSeat(seat, index);
+    if (!force && seat.sentiment && seat.sentiment !== seat.suggested_sentiment) {
+      return { ...seat, suggested_sentiment: suggestedSentiment };
+    }
+    return { ...seat, sentiment: suggestedSentiment, suggested_sentiment: suggestedSentiment };
+  });
 }
 
 function deriveThreadEntriesFromSession(session) {
@@ -640,12 +1113,14 @@ function renderThread() {
   syncPredictedPendingEntry();
   const thread = $("thread-view");
   const entries = threadEntriesForRender();
+  const activeEntry = currentSpeakerEntry();
   if (!entries.length) {
     thread.innerHTML = `
       <div class="thread-empty">
         <div>
-          <h3>No transcript yet</h3>
-          <p>Use the composer to start a debate, then the entire exchange will unfold here as one conversation.</p>
+          <span class="arena-presentation-badge">Arena ready</span>
+          <h3>${state.startInFlight ? "Opening the chamber" : "No transcript yet"}</h3>
+          <p>${state.startInFlight ? "Debaters are taking their seats." : "Start a debate to bring the council into session."}</p>
         </div>
       </div>
     `;
@@ -653,8 +1128,10 @@ function renderThread() {
   }
   thread.innerHTML = entries
     .map(
-      (entry) => `
-        <article class="thread-entry ${escapeHtml(entry.kind)} ${entry.pending ? "pending" : ""}">
+      (entry) => {
+        const active = activeEntry && entry.id === activeEntry.id;
+        return `
+        <article class="thread-entry ${escapeHtml(entry.kind)} ${entry.pending ? "pending" : ""} ${active ? "is-active-speaker" : ""} ${entry.kind === "judge" ? "is-judge-reveal" : ""}">
           <div class="thread-entry-head">
             <div>
               <div class="thread-entry-title">${escapeHtml(entry.display_name)}</div>
@@ -664,7 +1141,8 @@ function renderThread() {
           </div>
           <div class="thread-entry-body">${entry.display_text ? escapeHtml(entry.display_text) : thinkingDotsMarkup(`${entry.display_name || "Speaker"} is thinking`)}</div>
         </article>
-      `
+      `;
+      }
     )
     .join("");
   thread.scrollTop = thread.scrollHeight;
@@ -678,10 +1156,7 @@ function truncateStageBubble(text, limit = 148) {
 }
 
 function activeStageSpeakerEntry() {
-  if (state.pendingThreadEntry && ["agent", "judge"].includes(state.pendingThreadEntry.kind)) {
-    return state.pendingThreadEntry;
-  }
-  return [...state.threadEntries].reverse().find((entry) => ["agent", "judge"].includes(entry.kind)) || null;
+  return currentSpeakerEntry();
 }
 
 function spriteForActor(actor, index = 0) {
@@ -858,13 +1333,19 @@ function renderComposer() {
 
 function renderJudgeModelDropdown() {
   const selectedPreset = $("judge-preset").value || state.presets[0]?.id || "";
-  const currentValue = $("judge-model").dataset.value || "";
-  const nextValue = normalizedModelForPreset(selectedPreset, currentValue);
-  $("judge-model").innerHTML = modelOptions(selectedPreset, nextValue);
-  $("judge-model").dataset.value = nextValue;
-  $("judge-model").value = nextValue;
-  $("judge-model").disabled = Boolean(state.activeSession) || !activeModelsForPreset(selectedPreset).length;
-  $("judge-preset-note").textContent = presetNoteText(selectedPreset);
+  const lookup = modelLookupForJudge();
+  const manual = shouldUseManualModelInput(lookup);
+  const currentValue = currentJudgeModelValue() || $("judge-model").dataset.value || "";
+  const nextValue = normalizedModelForPreset(selectedPreset, currentValue, lookup);
+  $("judge-model").innerHTML = modelOptions(selectedPreset, nextValue, lookup);
+  $("judge-model").hidden = manual;
+  $("judge-model-manual").hidden = !manual;
+  $("judge-model").disabled = Boolean(state.activeSession) || manual || lookup.is_loading;
+  $("judge-model-manual").disabled = Boolean(state.activeSession) || lookup.is_loading;
+  $("refresh-judge-models").disabled = Boolean(state.activeSession) || lookup.is_loading;
+  $("refresh-judge-models").textContent = lookup.is_loading ? "Refreshing..." : "Refresh";
+  setJudgeModelValue(nextValue);
+  $("judge-preset-note").textContent = presetNoteText(selectedPreset, lookup);
 }
 
 function renderSeatSetup() {
@@ -873,6 +1354,13 @@ function renderSeatSetup() {
   container.innerHTML = state.seatConfigs
     .map((seat, index) => {
       const liveAgent = state.activeSession?.agents.find((agent) => agent.id === seat.id) || null;
+      const modelLookup = modelLookupForSeat(seat);
+      const manualModel = shouldUseManualModelInput(modelLookup);
+      const normalizedModel = normalizedModelForPreset(seat.preset_id, seat.model_name, modelLookup);
+      if (seat.model_name !== normalizedModel) seat.model_name = normalizedModel;
+      const modelControl = manualModel
+        ? `<input data-field="model_name" value="${escapeHtml(seat.model_name)}" ${locked || modelLookup.is_loading ? "disabled" : ""} placeholder="Enter model name" />`
+        : `<select data-field="model_name" ${locked || modelLookup.is_loading ? "disabled" : ""}>${modelOptions(seat.preset_id, seat.model_name, modelLookup)}</select>`;
       const providerSession = liveAgent?.provider_session || null;
       const providerSessionNotice = providerSession
         ? `
@@ -917,14 +1405,27 @@ function renderSeatSetup() {
             <span>Preset</span>
             <select data-field="preset_id" ${locked ? "disabled" : ""}>${presetOptions(seat.preset_id)}</select>
           </label>
-          <div class="preset-note">${escapeHtml(presetNoteText(seat.preset_id))}</div>
+          <div class="preset-note">${escapeHtml(presetNoteText(seat.preset_id, modelLookup))}</div>
           <label class="field">
             <span>Model</span>
-            <select data-field="model_name" ${locked || !activeModelsForPreset(seat.preset_id).length ? "disabled" : ""}>${modelOptions(seat.preset_id, seat.model_name)}</select>
+            <div class="model-control-row">
+              ${modelControl}
+              <button
+                data-action="refresh-seat-models"
+                data-seat-id="${escapeHtml(seat.id)}"
+                ${locked || modelLookup.is_loading ? "disabled" : ""}
+              >
+                ${modelLookup.is_loading ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
           </label>
           <label class="field">
             <span>Persona</span>
             <select data-field="persona_choice" ${locked ? "disabled" : ""}>${personaOptions(seat.persona_choice)}</select>
+          </label>
+          <label class="field">
+            <span>Debater Sentiment</span>
+            <select data-field="sentiment" ${locked ? "disabled" : ""}>${sentimentOptions(seat.sentiment || "exploratory")}</select>
           </label>
           <label class="field">
             <span>Persona Intensity <strong>${escapeHtml(personaIntensityLabel(seat.persona_intensity))}</strong></span>
@@ -1003,11 +1504,17 @@ function renderSettingsDrawer() {
   ["judge-name", "judge-preset", "judge-command", "judge-args", "judge-env"].forEach((id) => {
     $(id).disabled = Boolean(state.activeSession);
   });
+  ["debate-mode", "topic-type", "topic-tags"].forEach((id) => {
+    $(id).disabled = Boolean(state.activeSession);
+  });
   syncPopoverMode();
 }
 
 function renderArena() {
   renderArenaHeader();
+  renderArenaPhaseRail();
+  renderLiveSpeakerStrip();
+  applyArenaMotionState();
   renderSettingsDrawer();
   renderParticipantStrip();
   renderArenaFeedback();
@@ -1060,33 +1567,119 @@ function renderPersonas() {
 
 function renderPersonaGeneratorModelDropdown() {
   const presetId = $("persona-generator-preset").value || preferredPresetId();
-  const currentValue = $("persona-generator-model").dataset.value || "";
-  const nextValue = normalizedModelForPreset(presetId, currentValue);
-  $("persona-generator-model").innerHTML = modelOptions(presetId, nextValue);
-  $("persona-generator-model").dataset.value = nextValue;
-  $("persona-generator-model").value = nextValue;
-  $("persona-generator-note").textContent = presetNoteText(presetId);
+  const lookup = modelLookupForConfig(presetId);
+  const manual = shouldUseManualModelInput(lookup);
+  const currentValue = currentPersonaGeneratorModelValue() || $("persona-generator-model").dataset.value || "";
+  const nextValue = normalizedModelForPreset(presetId, currentValue, lookup);
+  $("persona-generator-model").innerHTML = modelOptions(presetId, nextValue, lookup);
+  $("persona-generator-model").hidden = manual;
+  $("persona-generator-model-manual").hidden = !manual;
+  $("persona-generator-model").disabled = manual || lookup.is_loading;
+  $("persona-generator-model-manual").disabled = lookup.is_loading;
+  $("refresh-persona-generator-models").disabled = lookup.is_loading;
+  $("refresh-persona-generator-models").textContent = lookup.is_loading ? "Refreshing..." : "Refresh";
+  setPersonaGeneratorModelValue(nextValue);
+  $("persona-generator-note").textContent = presetNoteText(presetId, lookup);
 }
 
 function renderSessions() {
-  $("session-list").innerHTML = state.sessions.length
-    ? state.sessions
+  const search = state.sessionFilters.search.trim().toLowerCase();
+  const sessions = state.sessions.filter((session) => {
+    const searchable = [
+      session.topic,
+      session.topic_type,
+      ...(session.topic_tags || []),
+      ...(session.agents || []).map((agent) => agent.sentiment || ""),
+    ].join(" ").toLowerCase();
+    return (
+      (!search || searchable.includes(search)) &&
+      (!state.sessionFilters.debateMode || session.debate_mode === state.sessionFilters.debateMode) &&
+      (!state.sessionFilters.topicType || session.topic_type === state.sessionFilters.topicType) &&
+      (!state.sessionFilters.status || session.status === state.sessionFilters.status)
+    );
+  });
+  $("session-list").innerHTML = sessions.length
+    ? sessions
         .map(
-          (session) => `
+          (session) => {
+            const debaters = (session.agents || []).filter((agent) => agent.role === "debater");
+            const winner = session.winner_human || session.winner_auto;
+            const winnerName = winner
+              ? debaters.find((agent) => agent.id === winner)?.display_name || "Winner selected"
+              : "";
+            return `
             <article class="session-item" data-id="${escapeHtml(session.id)}">
               <h3>${escapeHtml(session.topic)}</h3>
-              <p>Status: ${escapeHtml(capitalize(session.status.replaceAll("_", " ")))}</p>
+              <div class="session-meta-row">
+                <span class="workspace-pill">${escapeHtml(debateModeLabel(session.debate_mode))}</span>
+                <span class="workspace-pill">${escapeHtml(session.topic_type || "Other")}</span>
+                <span class="workspace-pill">${escapeHtml(capitalize(session.status.replaceAll("_", " ")))}</span>
+                ${winnerName ? `<span class="workspace-pill">Winner: ${escapeHtml(winnerName)}</span>` : ""}
+              </div>
+              ${
+                session.topic_tags?.length
+                  ? `<p>Tags: ${escapeHtml(session.topic_tags.join(", "))}</p>`
+                  : ""
+              }
+              ${
+                debaters.length
+                  ? `
+                    <div class="session-agent-labels">
+                      ${debaters
+                        .map(
+                          (agent) =>
+                            `<span class="session-agent-label">${escapeHtml(agent.display_name)}: ${escapeHtml(sentimentLabel(agent.sentiment))}</span>`
+                        )
+                        .join("")}
+                    </div>
+                  `
+                  : ""
+              }
               <p>Updated: ${escapeHtml(new Date(session.updated_at).toLocaleString())}</p>
+              <details class="session-label-editor">
+                <summary>Edit labels</summary>
+                <div class="workspace-field-grid" data-session-label-form="${escapeHtml(session.id)}">
+                  <label class="field">
+                    <span>Mode</span>
+                    <select data-session-label-field="debate_mode">
+                      ${DEBATE_MODES.map(
+                        (mode) =>
+                          `<option value="${escapeHtml(mode.value)}" ${mode.value === session.debate_mode ? "selected" : ""}>${escapeHtml(mode.label)}</option>`
+                      ).join("")}
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Topic Type</span>
+                    <select data-session-label-field="topic_type">${topicTypeOptions(session.topic_type || "Other")}</select>
+                  </label>
+                  <label class="field">
+                    <span>Tags</span>
+                    <input data-session-label-field="topic_tags" value="${escapeHtml((session.topic_tags || []).join(", "))}" />
+                  </label>
+                  ${debaters
+                    .map(
+                      (agent) => `
+                        <label class="field">
+                          <span>${escapeHtml(agent.display_name)} Sentiment</span>
+                          <select data-session-agent-sentiment="${escapeHtml(agent.id)}">${sentimentOptions(agent.sentiment || "exploratory")}</select>
+                        </label>
+                      `
+                    )
+                    .join("")}
+                </div>
+                <button data-label-save-id="${escapeHtml(session.id)}">Save Labels</button>
+              </details>
               <div class="session-item-actions">
                 <button data-session-id="${escapeHtml(session.id)}">Open In Arena</button>
                 <button data-reuse-id="${escapeHtml(session.id)}">Reuse Settings</button>
                 <button class="danger-action" data-delete-id="${escapeHtml(session.id)}">Delete</button>
               </div>
             </article>
-          `
+          `;
+          }
         )
         .join("")
-    : `<div class="session-item"><p>No saved chambers yet.</p></div>`;
+    : `<div class="session-item"><p>No saved chambers match the current filters.</p></div>`;
 }
 
 function fillPersonaForm(persona) {
@@ -1113,7 +1706,7 @@ function getJudgePayload() {
   return {
     display_name: $("judge-name").value.trim(),
     preset_id: $("judge-preset").value,
-    model_name: $("judge-model").value,
+    model_name: currentJudgeModelValue(),
     command: parseJsonArray($("judge-command").value),
     args_template: parseJsonArray($("judge-args").value),
     env: parseJsonObject($("judge-env").value),
@@ -1124,7 +1717,7 @@ function getPersonaGeneratorPayload() {
   return {
     display_name: "Persona Smith",
     preset_id: $("persona-generator-preset").value,
-    model_name: $("persona-generator-model").value,
+    model_name: currentPersonaGeneratorModelValue(),
   };
 }
 
@@ -1156,16 +1749,23 @@ function applySessionToDraft(session) {
       args_template: agent.args_template?.length ? JSON.stringify(agent.args_template) : "",
       env_json: agent.env && Object.keys(agent.env).length ? JSON.stringify(agent.env) : "",
       persona_intensity: clampPersonaIntensity(agent.persona_intensity),
+      sentiment: SENTIMENTS.includes(agent.sentiment) ? agent.sentiment : "exploratory",
+      suggested_sentiment: SENTIMENTS.includes(agent.sentiment) ? agent.sentiment : "exploratory",
     }));
   const judge = session.agents.find((agent) => agent.role === "judge");
   if (judge) {
     $("judge-name").value = judge.display_name;
     $("judge-preset").value = judge.preset_id;
-    $("judge-model").dataset.value = normalizedModelForPreset(judge.preset_id, judge.model_name);
+    setJudgeModelValue(normalizedModelForPreset(judge.preset_id, judge.model_name, modelLookupForJudge()));
     $("judge-command").value = judge.command?.length ? JSON.stringify(judge.command) : "";
     $("judge-args").value = judge.args_template?.length ? JSON.stringify(judge.args_template) : "";
     $("judge-env").value = judge.env && Object.keys(judge.env).length ? JSON.stringify(judge.env) : "";
   }
+  $("debate-mode").value = session.debate_mode || "serious";
+  $("topic-type").value = normalizeTopicType(session.topic_type);
+  $("topic-tags").value = (session.topic_tags || []).join(", ");
+  state.lastSuggestedTopicType = suggestTopicType(session.topic || "");
+  state.topicTypeTouched = $("topic-type").value !== state.lastSuggestedTopicType;
 }
 
 function upsertThreadEntry(entry) {
@@ -1421,10 +2021,14 @@ async function startDebate() {
 
     const payload = {
       topic,
+      debate_mode: $("debate-mode").value || "serious",
+      topic_type: $("topic-type").value || "Other",
+      topic_tags: uniqueCsv($("topic-tags").value),
       agents: state.seatConfigs.map((seat, index) => ({
         display_name: seat.display_name.trim() || `Debater ${index + 1}`,
         preset_id: seat.preset_id,
         model_name: seat.model_name,
+        sentiment: SENTIMENTS.includes(seat.sentiment) ? seat.sentiment : "exploratory",
         persona_id: seat.persona_choice === "auto" ? null : seat.persona_choice,
         persona_mode: seat.persona_choice === "auto" ? "auto" : "manual",
         persona_intensity: clampPersonaIntensity(seat.persona_intensity),
@@ -1673,6 +2277,30 @@ async function deleteSession(sessionId) {
   await refreshSessions();
 }
 
+async function saveSessionLabels(sessionId, form) {
+  const debaterSentiments = {};
+  form.querySelectorAll("[data-session-agent-sentiment]").forEach((select) => {
+    debaterSentiments[select.dataset.sessionAgentSentiment] = select.value;
+  });
+  const payload = {
+    debate_mode: form.querySelector('[data-session-label-field="debate_mode"]').value,
+    topic_type: form.querySelector('[data-session-label-field="topic_type"]').value,
+    topic_tags: uniqueCsv(form.querySelector('[data-session-label-field="topic_tags"]').value),
+    debater_sentiments: debaterSentiments,
+  };
+  const session = await fetchJson(`/api/sessions/${sessionId}/metadata`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  if (state.activeSessionId === sessionId) {
+    state.activeSession = session;
+    syncThreadEntriesFromSession(session);
+    applySessionToDraft(session);
+    renderArena();
+  }
+  await refreshSessions();
+}
+
 async function handleComposerSubmit() {
   await startDebate();
 }
@@ -1692,6 +2320,9 @@ function registerSeatListeners() {
     const seat = state.seatConfigs.find((item) => item.id === card.dataset.seatId);
     if (!seat) return;
     seat[field] = field === "persona_intensity" ? clampPersonaIntensity(event.target.value) : event.target.value;
+    if (["command", "args_template", "env_json"].includes(field)) {
+      scheduleSeatModelLookup(seat);
+    }
     renderParticipantStrip();
     persistDraft();
     if (field === "persona_intensity") renderSettingsDrawer();
@@ -1706,13 +2337,34 @@ function registerSeatListeners() {
     if (!seat) return;
     seat[field] = field === "persona_intensity" ? clampPersonaIntensity(event.target.value) : event.target.value;
     if (field === "preset_id") {
-      seat.model_name = defaultModelForPreset(seat.preset_id);
+      seat.model_name = "";
       persistDraft();
       renderArena();
+      refreshSeatModelLookup(seat).then(() => {
+        persistDraft();
+        renderArena();
+      }).catch((error) => {
+        console.error(error);
+        setArenaFeedback(error.message || "Could not refresh debater models.", "error");
+        renderArena();
+      });
+      return;
+    }
+    if (field === "persona_choice") {
+      const suggested = suggestSentimentForSeat(seat, state.seatConfigs.indexOf(seat));
+      if (!seat.sentiment || seat.sentiment === seat.suggested_sentiment) {
+        seat.sentiment = suggested;
+        seat.suggested_sentiment = suggested;
+        renderSettingsDrawer();
+      } else {
+        seat.suggested_sentiment = suggested;
+      }
+      persistDraft();
+      renderParticipantStrip();
       return;
     }
     if (field === "model_name") {
-      seat.model_name = normalizedModelForPreset(seat.preset_id, seat.model_name);
+      seat.model_name = normalizedModelForPreset(seat.preset_id, seat.model_name, modelLookupForSeat(seat));
       persistDraft();
       renderArena();
       return;
@@ -1726,6 +2378,17 @@ function registerSeatListeners() {
       const agentId = event.target.dataset.agentId;
       if (!state.activeSession || !agentId) return;
       resetDebaterSession(agentId).catch(alert);
+      return;
+    }
+    if (event.target.dataset.action === "refresh-seat-models") {
+      const seatId = event.target.dataset.seatId;
+      const seat = state.seatConfigs.find((item) => item.id === seatId);
+      if (!seat || state.activeSession) return;
+      refreshSeatModelsNow(seat).catch((error) => {
+        console.error(error);
+        setArenaFeedback(error.message || "Could not refresh debater models.", "error");
+        renderArena();
+      });
       return;
     }
     if (state.activeSession) return;
@@ -1742,9 +2405,18 @@ function registerSeatListeners() {
 function registerArenaListeners() {
   $("add-seat").addEventListener("click", () => {
     if (state.activeSession || state.seatConfigs.length >= 5) return;
-    state.seatConfigs.push(buildSeatConfig(state.seatConfigs.length));
+    const seat = buildSeatConfig(state.seatConfigs.length);
+    state.seatConfigs.push(seat);
     persistDraft();
     renderArena();
+    refreshSeatModelLookup(seat).then(() => {
+      persistDraft();
+      renderArena();
+    }).catch((error) => {
+      console.error(error);
+      setArenaFeedback(error.message || "Could not refresh debater models.", "error");
+      renderArena();
+    });
   });
 
   $("ask-suggestions").addEventListener("click", () => askJudgeSuggestions().catch((error) => {
@@ -1777,8 +2449,11 @@ function registerArenaListeners() {
   $("main-composer").addEventListener("input", () => {
     if (!state.activeSession) {
       setArenaFeedback();
+      maybeSuggestWorkspaceMetadata();
       persistDraft();
+      renderSettingsDrawer();
       renderArenaHeader();
+      renderParticipantStrip();
       renderArenaFeedback();
     }
   });
@@ -1792,28 +2467,110 @@ function registerArenaListeners() {
   });
 }
 
+function registerWorkspaceListeners() {
+  ["debate-mode", "topic-tags"].forEach((id) => {
+    $(id).addEventListener("input", () => {
+      if (state.activeSession) return;
+      persistDraft();
+    });
+  });
+  $("topic-type").addEventListener("change", () => {
+    if (state.activeSession) return;
+    state.topicTypeTouched = true;
+    persistDraft();
+  });
+  ["session-search", "session-mode-filter", "session-topic-filter", "session-status-filter"].forEach((id) => {
+    $(id).addEventListener("input", () => {
+      state.sessionFilters = {
+        search: $("session-search").value,
+        debateMode: $("session-mode-filter").value,
+        topicType: $("session-topic-filter").value,
+        status: $("session-status-filter").value,
+      };
+      renderSessions();
+    });
+    $(id).addEventListener("change", () => {
+      state.sessionFilters = {
+        search: $("session-search").value,
+        debateMode: $("session-mode-filter").value,
+        topicType: $("session-topic-filter").value,
+        status: $("session-status-filter").value,
+      };
+      renderSessions();
+    });
+  });
+}
+
 function registerJudgeListeners() {
   $("judge-preset").addEventListener("change", () => {
     if (state.activeSession) return;
-    $("judge-model").dataset.value = defaultModelForPreset($("judge-preset").value);
+    setJudgeModelValue("");
     persistDraft();
     renderJudgeModelDropdown();
     renderParticipantStrip();
+    refreshJudgeModelLookup().then(() => {
+      persistDraft();
+      renderJudgeModelDropdown();
+      renderParticipantStrip();
+    }).catch((error) => {
+      console.error(error);
+      setArenaFeedback(error.message || "Could not refresh judge models.", "error");
+      renderArena();
+    });
   });
   $("judge-model").addEventListener("change", () => {
-    $("judge-model").dataset.value = $("judge-model").value;
+    setJudgeModelValue($("judge-model").value);
     persistDraft();
     renderParticipantStrip();
+  });
+  $("judge-model-manual").addEventListener("input", () => {
+    setJudgeModelValue($("judge-model-manual").value);
+    persistDraft();
+    renderParticipantStrip();
+  });
+  $("refresh-judge-models").addEventListener("click", () => {
+    if (state.activeSession) return;
+    refreshJudgeModelsNow().catch((error) => {
+      console.error(error);
+      setArenaFeedback(error.message || "Could not refresh judge models.", "error");
+      renderArena();
+    });
   });
   ["judge-name", "judge-command", "judge-args"].forEach((id) => {
     $(id).addEventListener("input", () => {
       persistDraft();
       renderParticipantStrip();
+      if (["judge-command", "judge-args"].includes(id)) {
+        window.clearTimeout(state.modelLookupTimers.judge);
+        state.modelLookupTimers.judge = window.setTimeout(() => {
+          refreshJudgeModelLookup().then(() => {
+            persistDraft();
+            renderJudgeModelDropdown();
+            renderParticipantStrip();
+          }).catch((error) => {
+            console.error(error);
+            setArenaFeedback(error.message || "Could not refresh judge models.", "error");
+            renderArena();
+          });
+        }, 400);
+      }
     });
   });
   $("judge-env").addEventListener("input", () => {
     persistDraft();
     renderParticipantStrip();
+    window.clearTimeout(state.modelLookupTimers.judge);
+    state.modelLookupTimers.judge = window.setTimeout(() => {
+      refreshJudgeModelLookup().then(() => {
+        persistDraft();
+        renderJudgeModelDropdown();
+        renderParticipantStrip();
+      }).catch((error) => {
+        console.error(error);
+        setArenaFeedback(error.message || "Could not refresh judge models.", "error");
+        renderArena();
+      });
+    }, 400);
   });
 }
 
@@ -1825,11 +2582,28 @@ function registerPersonaListeners() {
     renderPersonas();
   }));
   $("persona-generator-preset").addEventListener("change", () => {
-    $("persona-generator-model").dataset.value = defaultModelForPreset($("persona-generator-preset").value);
+    setPersonaGeneratorModelValue("");
     renderPersonaGeneratorModelDropdown();
+    refreshPersonaGeneratorModelLookup().then(() => {
+      renderPersonaGeneratorModelDropdown();
+    }).catch((error) => {
+      console.error(error);
+      setPersonaFeedback(error.message || "Could not refresh generator models.", "error");
+      renderPersonas();
+    });
   });
   $("persona-generator-model").addEventListener("change", () => {
-    $("persona-generator-model").dataset.value = $("persona-generator-model").value;
+    setPersonaGeneratorModelValue($("persona-generator-model").value);
+  });
+  $("persona-generator-model-manual").addEventListener("input", () => {
+    setPersonaGeneratorModelValue($("persona-generator-model-manual").value);
+  });
+  $("refresh-persona-generator-models").addEventListener("click", () => {
+    refreshPersonaGeneratorModelsNow().catch((error) => {
+      console.error(error);
+      setPersonaFeedback(error.message || "Could not refresh generator models.", "error");
+      renderPersonas();
+    });
   });
   $("persona-list").addEventListener("click", (event) => {
     const personaId = event.target.dataset.personaId;
@@ -1878,6 +2652,12 @@ function registerSessionListeners() {
     const deleteId = event.target.dataset.deleteId;
     if (deleteId) {
       deleteSession(deleteId).catch(alert);
+      return;
+    }
+    const labelSaveId = event.target.dataset.labelSaveId;
+    if (labelSaveId) {
+      const form = event.target.closest(".session-label-editor")?.querySelector("[data-session-label-form]");
+      if (form) saveSessionLabels(labelSaveId, form).catch(alert);
     }
   });
 }
@@ -1886,23 +2666,30 @@ async function boot() {
   registerViewListeners();
   registerSeatListeners();
   registerArenaListeners();
+  registerWorkspaceListeners();
   registerJudgeListeners();
   registerPopoverListeners();
   registerPersonaListeners();
   registerSessionListeners();
 
+  $("topic-type").innerHTML = topicTypeOptions("Other");
+  $("session-topic-filter").innerHTML = topicTypeOptions("", true);
   state.presets = await fetchJson("/api/presets");
   const defaultJudgePresetId = preferredPresetId();
   $("judge-preset").innerHTML = presetOptions(defaultJudgePresetId);
   $("judge-preset").value = defaultJudgePresetId;
   $("persona-generator-preset").innerHTML = presetOptions(defaultJudgePresetId);
   $("persona-generator-preset").value = defaultJudgePresetId;
+  setJudgeModelValue(defaultModelForPreset(defaultJudgePresetId));
 
   await loadPersonas();
   state.presentationMode = readArenaPresentationMode();
   initializeSeatConfigs();
   restoreDraft();
-  $("persona-generator-model").dataset.value = defaultModelForPreset($("persona-generator-preset").value);
+  maybeSuggestWorkspaceMetadata();
+  renderWorkspaceControls();
+  setPersonaGeneratorModelValue(defaultModelForPreset($("persona-generator-preset").value));
+  await refreshAllModelLookups();
   renderPersonaGeneratorModelDropdown();
   renderArena();
   await refreshSessions();

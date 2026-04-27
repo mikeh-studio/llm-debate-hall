@@ -42,6 +42,7 @@ class AgentConfigModel(BaseModel):
     preset_id: str
     model_name: str
     side: str = "independent"
+    sentiment: str = "exploratory"
     persona_id: str | None = None
     persona_mode: str = "manual"
     persona_intensity: float = Field(default=1.0, ge=0.5, le=1.5)
@@ -59,10 +60,39 @@ class JudgeConfigModel(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+class ModelLookupRequest(BaseModel):
+    command: list[str] | None = None
+    args_template: list[str] | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+    refresh: bool = False
+
+
 class CreateSessionRequest(BaseModel):
     topic: str
+    debate_mode: str = "serious"
+    topic_type: str = "Other"
+    topic_tags: list[str] = Field(default_factory=list)
     agents: list[AgentConfigModel]
     judge: JudgeConfigModel
+
+
+class SessionMetadataUpdate(BaseModel):
+    debate_mode: str | None = None
+    topic_type: str | None = None
+    topic_tags: list[str] | None = None
+    debater_sentiments: dict[str, str] = Field(default_factory=dict)
+
+
+class WorkspaceSuggestionAgent(BaseModel):
+    display_name: str = ""
+    side: str = "independent"
+    persona_id: str | None = None
+    persona_choice: str | None = None
+
+
+class WorkspaceSuggestionRequest(BaseModel):
+    topic: str
+    agents: list[WorkspaceSuggestionAgent] = Field(default_factory=list)
 
 
 class HumanVoteRequest(BaseModel):

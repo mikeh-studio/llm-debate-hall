@@ -29,7 +29,13 @@ It is built for a very specific kind of experiment: using the local tools you al
 - Structured trace export for later analysis
 - Local SQLite storage for sessions, messages, and scores
 
-The judge is stateless and evaluates from the stored transcript. Supported provider defaults currently map to `codex exec`, `claude -p`, and `ollama run`. Gemini still needs a manual command override in this build.
+The judge is stateless and evaluates from the stored transcript. Supported provider defaults currently map to `codex exec` and `claude -p`. Gemini still needs a manual command override in this build.
+
+## Provider Model Readiness
+
+Model selectors are populated from the local provider tooling instead of a hardcoded UI list where possible. OpenAI models are read from the Codex CLI catalog, and each selector has a `Refresh` control for rechecking local provider state after auth, CLI, or model-access changes.
+
+Anthropic readiness requires more than the `claude` binary being installed. The app checks `claude auth status` and then runs a small non-interactive `sonnet` probe before marking Anthropic models available. If `claude -p --model sonnet "Reply with OK."` fails locally, Anthropic models stay unavailable in the app until the CLI login or `ANTHROPIC_API_KEY` setup is fixed and the selector is refreshed.
 
 ## Current UI
 
@@ -93,7 +99,7 @@ The smoke workflow shipped alongside two runtime fixes that matter for real-prov
 - longer generation timeouts for slow live turns, configurable with `LLM_DEBATE_HALL_GENERATION_TIMEOUT_SECONDS`
 - process-group cleanup on timeout so orphaned provider subprocesses do not linger after a failed turn
 
-The runner requires at least one validated real provider from the built-in `openai`, `anthropic`, or `ollama` presets. It will not fall back to `mock`, and its generated reports/screenshots are intended as local evidence rather than committed source.
+The runner requires at least one validated real provider from the built-in `openai` or `anthropic` presets. It will not fall back to `mock`, and its generated reports/screenshots are intended as local evidence rather than committed source.
 
 ## Project Layout
 
@@ -104,7 +110,7 @@ The runner requires at least one validated real provider from the built-in `open
 ## Status
 
 - Local-first and experimental
-- Built around local CLIs such as Codex, Claude, and Ollama
+- Built around local CLIs such as Codex and Claude
 - Strongest on single-machine use, not hosted deployment
 - Best treated as a serious prototype rather than a polished SaaS product
 

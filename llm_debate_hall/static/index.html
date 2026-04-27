@@ -58,7 +58,11 @@
                   </label>
                   <label class="field">
                     <span>Model</span>
-                    <select id="judge-model"></select>
+                    <div class="model-control-row">
+                      <select id="judge-model"></select>
+                      <input id="judge-model-manual" placeholder="Enter model name" hidden />
+                      <button id="refresh-judge-models" type="button">Refresh</button>
+                    </div>
                   </label>
                   <div class="preset-note" id="judge-preset-note"></div>
                   <details class="advanced-panel">
@@ -90,6 +94,25 @@
             </label>
             <div class="thread-feedback" id="thread-feedback"></div>
             <div class="suggestion-list" id="suggestion-list"></div>
+            <section class="workspace-setup" aria-label="Debate workspace metadata">
+              <div class="workspace-field-grid">
+                <label class="field">
+                  <span>Debate Mode</span>
+                  <select id="debate-mode">
+                    <option value="theater">Theater & Delight</option>
+                    <option value="serious" selected>Serious Analysis</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Topic Type</span>
+                  <select id="topic-type"></select>
+                </label>
+                <label class="field">
+                  <span>Tags</span>
+                  <input id="topic-tags" placeholder="governance, safety, product" />
+                </label>
+              </div>
+            </section>
             <div class="composer-bar">
               <div class="composer-hint" id="composer-hint"></div>
               <div class="composer-actions">
@@ -117,6 +140,10 @@
           <p class="arena-subtitle" id="arena-subtitle">
             Configure debaters in Setup, then start the debate.
           </p>
+          <section class="arena-experience" aria-label="Debate progress">
+            <div class="arena-phase-rail" id="arena-phase-rail"></div>
+            <div class="live-speaker-strip" id="live-speaker-strip"></div>
+          </section>
 
           <div class="arena-presentation-bar">
             <div class="arena-presentation-copy">
@@ -204,7 +231,11 @@
                 </label>
                 <label class="field">
                   <span>Generator Model</span>
-                  <select id="persona-generator-model"></select>
+                  <div class="model-control-row">
+                    <select id="persona-generator-model"></select>
+                    <input id="persona-generator-model-manual" placeholder="Enter model name" hidden />
+                    <button id="refresh-persona-generator-models" type="button">Refresh</button>
+                  </div>
                 </label>
               </div>
               <div class="preset-note" id="persona-generator-note"></div>
@@ -258,6 +289,37 @@
                 <h2>Saved Chambers</h2>
               </div>
               <button id="refresh-sessions">Refresh</button>
+            </div>
+            <div class="workspace-filters">
+              <label class="field">
+                <span>Search</span>
+                <input id="session-search" placeholder="Search topics and tags" />
+              </label>
+              <label class="field">
+                <span>Mode</span>
+                <select id="session-mode-filter">
+                  <option value="">All modes</option>
+                  <option value="theater">Theater & Delight</option>
+                  <option value="serious">Serious Analysis</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Topic Type</span>
+                <select id="session-topic-filter"></select>
+              </label>
+              <label class="field">
+                <span>Status</span>
+                <select id="session-status-filter">
+                  <option value="">All statuses</option>
+                  <option value="draft">Draft</option>
+                  <option value="selecting_personas">Selecting Personas</option>
+                  <option value="running">Running</option>
+                  <option value="awaiting_continue">Awaiting Continue</option>
+                  <option value="awaiting_winner">Awaiting Winner</option>
+                  <option value="completed">Completed</option>
+                  <option value="failed">Failed</option>
+                </select>
+              </label>
             </div>
             <div id="session-list" class="session-list"></div>
           </section>

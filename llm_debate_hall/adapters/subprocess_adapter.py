@@ -59,6 +59,7 @@ ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS = int(
     os.environ.get("LLM_DEBATE_HALL_ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS", "300")
 )
 _PROBE_CACHE: dict[str, tuple[float, list[str]]] = {}
+_CATALOG_CACHE: dict[str, tuple[float, list[str]]] = {}
 _PROBE_CACHE_LOCK = threading.Lock()
 
 
@@ -311,37 +312,72 @@ def _probe_claude_model(preset: BackendPresetModel, model_name: str, env: dict[s
     return completed.returncode == 0 and bool(raw_text) and _classify_provider_issue(raw_text) is None
 
 
-def _probe_ollama_models(preset: BackendPresetModel, env: dict[str, str] | None = None) -> list[str]:
-    try:
-        completed = subprocess.run(
-            [*preset.command, "list"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
-            env=_merged_env(env or {}),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-
-    if completed.returncode != 0:
-        return []
-
-    installed_models: list[str] = []
-    for line in completed.stdout.splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith("name "):
-            continue
-        installed_models.append(line.split()[0])
-    allowed = set(preset.models)
-    return [model for model in installed_models if model in allowed]
-
-
 def _normalized_probe_env(env: dict[str, str] | None = None) -> dict[str, str] | None:
     return env or None
 
 
-def probe_active_models(preset: BackendPresetModel, env: dict[str, str] | None = None) -> list[str]:
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end < start:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _codex_catalog_models(preset: BackendPresetModel) -> list[str]:
+    if not preset.command or shutil.which(preset.command[0]) is None:
+        return []
+    try:
+        completed = subprocess.run(
+            [*preset.command, "debug", "models"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if completed.returncode != 0:
+        return []
+    payload = _extract_json_object(f"{completed.stdout}\n{completed.stderr}")
+    models = payload.get("models") if payload else None
+    if not isinstance(models, list):
+        return []
+    slugs = []
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        if item.get("visibility") not in {None, "list"}:
+            continue
+        slug = item.get("slug")
+        if isinstance(slug, str) and slug.strip():
+            slugs.append(slug.strip())
+    return list(dict.fromkeys(slugs))
+
+
+def catalog_models(preset: BackendPresetModel, *, force_refresh: bool = False) -> list[str]:
+    if preset.id != "openai" or preset.invocation_mode != "codex_exec":
+        return []
+    if not force_refresh:
+        with _PROBE_CACHE_LOCK:
+            cached = _CATALOG_CACHE.get(preset.id)
+            if cached and (time.time() - cached[0]) < PROBE_CACHE_TTL_SECONDS:
+                return list(cached[1])
+    models = _codex_catalog_models(preset)
+    with _PROBE_CACHE_LOCK:
+        _CATALOG_CACHE[preset.id] = (time.time(), list(models))
+    return models
+
+
+def probe_active_models(
+    preset: BackendPresetModel,
+    env: dict[str, str] | None = None,
+    *,
+    force_refresh: bool = False,
+) -> list[str]:
     normalized_env = _normalized_probe_env(env)
     if preset.id == "mock":
         return list(preset.models)
@@ -350,15 +386,17 @@ def probe_active_models(preset: BackendPresetModel, env: dict[str, str] | None =
     if not preset.command or shutil.which(preset.command[0]) is None:
         return []
 
-    if normalized_env is None:
+    catalog = catalog_models(preset, force_refresh=force_refresh)
+    if catalog:
+        return catalog
+
+    if normalized_env is None and not force_refresh:
         with _PROBE_CACHE_LOCK:
             cached = _PROBE_CACHE.get(preset.id)
             if cached and (time.time() - cached[0]) < PROBE_CACHE_TTL_SECONDS:
                 return list(cached[1])
 
-    if preset.invocation_mode == "ollama_run":
-        active_models = _probe_ollama_models(preset, normalized_env)
-    elif preset.invocation_mode == "codex_exec":
+    if preset.invocation_mode == "codex_exec":
         active_models = [model for model in preset.models if _probe_codex_model(preset, model, normalized_env)]
     elif preset.invocation_mode == "claude_print":
         active_models = [model for model in preset.models if _probe_claude_model(preset, model, normalized_env)]
@@ -425,12 +463,6 @@ def build_invocation_plan(request: AdapterRequest) -> InvocationPlan:
             return InvocationPlan(
                 command=[*request.command, "-p", "--model", request.model_name, request.prompt],
                 stdin_text=None,
-                output_parser=lambda text: text.strip(),
-            )
-        if preset.invocation_mode == "ollama_run":
-            return InvocationPlan(
-                command=[*request.command, "run", request.model_name],
-                stdin_text=request.prompt,
                 output_parser=lambda text: text.strip(),
             )
 

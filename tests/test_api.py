@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import llm_debate_hall.main as main_module
+import llm_debate_hall.model_catalog as model_catalog
 from llm_debate_hall.main import create_app
 from llm_debate_hall.models import BackendPresetModel
 
@@ -59,6 +60,178 @@ def test_presets_include_active_model_metadata(tmp_path: Path, monkeypatch) -> N
     assert openai["default_model"] == "gpt-5-mini"
     assert gemini["requires_command_override"] is True
     assert gemini["active_models"] == []
+
+
+def test_preset_model_lookup_returns_exact_config_models(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(model_catalog, "catalog_models", lambda preset, force_refresh=False: [])
+    monkeypatch.setattr(
+        model_catalog,
+        "active_models_for_preset",
+        lambda preset_id, env=None, force_refresh=False: ["gpt-5-mini"] if preset_id == "openai" else [],
+    )
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/presets/openai/models",
+        json={"env": {"OPENAI_API_KEY": "local"}, "refresh": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_models"] == ["gpt-5-mini"]
+    assert payload["default_model"] == "gpt-5-mini"
+    assert payload["model_validation_mode"] == "validated"
+
+
+def test_preset_model_lookup_uses_codex_catalog(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        model_catalog,
+        "catalog_models",
+        lambda preset, force_refresh=False: ["gpt-5.4", "gpt-5.3-codex-spark"] if preset.id == "openai" else [],
+    )
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    response = client.post("/api/presets/openai/models", json={"refresh": True})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_models"] == ["gpt-5.4", "gpt-5.3-codex-spark"]
+    assert payload["default_model"] == "gpt-5.4"
+    assert payload["model_validation_mode"] == "catalog"
+
+
+def test_anthropic_model_lookup_blocks_unauthenticated_cli(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(model_catalog.shutil, "which", lambda command: f"/usr/bin/{command}")
+
+    class Completed:
+        returncode = 1
+        stdout = '{"loggedIn": false, "authMethod": "none"}'
+        stderr = ""
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(model_catalog.subprocess, "run", lambda *args, **kwargs: Completed())
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    lookup = client.post("/api/presets/anthropic/models", json={"refresh": True})
+
+    assert lookup.status_code == 200
+    payload = lookup.json()
+    assert payload["active_models"] == []
+    assert payload["model_validation_mode"] == "auth_error"
+    assert payload["provider_ready"] is False
+    assert "claude auth login" in payload["provider_auth_error"]
+
+    response = client.post(
+        "/api/sessions",
+        json={
+            "topic": "Should teams allow agents to negotiate?",
+            "agents": [
+                {"display_name": "Athena", "preset_id": "anthropic", "model_name": "sonnet"},
+                {"display_name": "Burke", "preset_id": "mock", "model_name": "mock-model"},
+            ],
+            "judge": {"display_name": "Solon", "preset_id": "mock", "model_name": "mock-model"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "claude auth login" in response.text
+
+
+def test_anthropic_model_lookup_verifies_api_key_auth(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(model_catalog.shutil, "which", lambda command: f"/usr/bin/{command}")
+
+    class StatusCompleted:
+        returncode = 1
+        stdout = '{"loggedIn": false, "authMethod": "none"}'
+        stderr = ""
+
+    class ProbeCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = "Not logged in · Please run /login"
+
+    calls = []
+
+    def fake_run(command, *args, **kwargs):
+        calls.append(command)
+        return StatusCompleted() if command[:3] == ["claude", "auth", "status"] else ProbeCompleted()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "bad-key")
+    monkeypatch.setattr(model_catalog.subprocess, "run", fake_run)
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    lookup = client.post("/api/presets/anthropic/models", json={"refresh": True})
+
+    assert lookup.status_code == 200
+    payload = lookup.json()
+    assert payload["active_models"] == []
+    assert payload["model_validation_mode"] == "auth_error"
+    assert "ANTHROPIC_API_KEY" in payload["provider_auth_error"]
+    assert any(command[:3] == ["claude", "-p", "--model"] for command in calls)
+
+
+def test_anthropic_model_lookup_requires_generation_probe_when_logged_in(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(model_catalog.shutil, "which", lambda command: f"/usr/bin/{command}")
+
+    class StatusCompleted:
+        returncode = 0
+        stdout = '{"loggedIn": true, "authMethod": "claude.ai"}'
+        stderr = ""
+
+    class ProbeCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = "Failed to authenticate. API Error: 401"
+
+    calls = []
+
+    def fake_run(command, *args, **kwargs):
+        calls.append(command)
+        return StatusCompleted() if command[:3] == ["claude", "auth", "status"] else ProbeCompleted()
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(model_catalog.subprocess, "run", fake_run)
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    lookup = client.post("/api/presets/anthropic/models", json={"refresh": True})
+
+    assert lookup.status_code == 200
+    payload = lookup.json()
+    assert payload["active_models"] == []
+    assert payload["model_validation_mode"] == "auth_error"
+    assert "could not run `sonnet`" in payload["provider_auth_error"]
+    assert any(command[:3] == ["claude", "-p", "--model"] for command in calls)
+
+
+def test_preset_model_lookup_exposes_manual_entry_for_overrides(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/presets/openai/models",
+        json={"command": ["custom-cli"], "args_template": ["--model", "{model}"], "refresh": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_models"] == []
+    assert payload["manual_model_entry"] is True
+    assert payload["model_validation_mode"] == "manual"
+
+
+def test_preset_model_lookup_rejects_unknown_preset(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    response = client.post("/api/presets/unknown/models", json={"refresh": True})
+
+    assert response.status_code == 400
+    assert "Unknown preset" in response.text
 
 
 def test_health_endpoints_return_ok(tmp_path: Path) -> None:
@@ -137,6 +310,87 @@ def test_question_validation_and_suggestions(tmp_path: Path) -> None:
     )
     assert suggestions.status_code == 200
     assert len(suggestions.json()["suggestions"]) == 3
+
+
+def test_workspace_suggestions_are_deterministic(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/workspace/suggestions",
+        json={
+            "topic": "Should AI agents run production incident reviews?",
+            "agents": [
+                {"display_name": "Athena", "persona_id": "stoic_rationalist"},
+                {"display_name": "Burke", "persona_id": "skeptical_historian"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["debate_mode"] == "serious"
+    assert payload["topic_type"] == "AI & Technology"
+    assert payload["agent_sentiments"][0]["sentiment"] == "affirming"
+    assert payload["agent_sentiments"][1]["sentiment"] == "skeptical"
+
+
+def test_api_session_workspace_metadata_roundtrip_and_patch(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/sessions",
+        json={
+            "topic": "Should AI agents run production incident reviews?",
+            "debate_mode": "theater",
+            "topic_type": "AI & Technology",
+            "topic_tags": ["incident", "agents"],
+            "agents": [
+                {
+                    "display_name": "Athena",
+                    "preset_id": "mock",
+                    "model_name": "mock-model",
+                    "sentiment": "affirming",
+                },
+                {
+                    "display_name": "Burke",
+                    "preset_id": "mock",
+                    "model_name": "mock-model",
+                    "sentiment": "opposing",
+                },
+            ],
+            "judge": {"display_name": "Solon", "preset_id": "mock", "model_name": "mock-model"},
+        },
+    )
+
+    assert response.status_code == 200
+    session = response.json()
+    assert session["debate_mode"] == "theater"
+    assert session["topic_type"] == "AI & Technology"
+    assert session["topic_tags"] == ["incident", "agents"]
+    debater = next(agent for agent in session["agents"] if agent["role"] == "debater")
+    assert debater["sentiment"] == "affirming"
+
+    patched = client.patch(
+        f"/api/sessions/{session['id']}/metadata",
+        json={
+            "debate_mode": "serious",
+            "topic_type": "Product",
+            "topic_tags": ["roadmap"],
+            "debater_sentiments": {debater["id"]: "skeptical"},
+        },
+    )
+
+    assert patched.status_code == 200
+    payload = patched.json()
+    assert payload["debate_mode"] == "serious"
+    assert payload["topic_type"] == "Product"
+    assert payload["topic_tags"] == ["roadmap"]
+    updated_debater = next(agent for agent in payload["agents"] if agent["id"] == debater["id"])
+    assert updated_debater["sentiment"] == "skeptical"
+    listed = client.get("/api/sessions").json()[0]
+    assert listed["agents"][0]["sentiment"] == "skeptical"
 
 
 def test_api_session_flow_pause_then_judge_decision(tmp_path: Path) -> None:
@@ -317,10 +571,12 @@ def test_api_rejects_more_than_five_debaters(tmp_path: Path) -> None:
 
 
 def test_api_rejects_inactive_default_model_selection(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(model_catalog, "_provider_auth_error", lambda preset_id, command, env: None)
     monkeypatch.setattr(
-        main_module,
+        model_catalog,
         "active_models_for_preset",
-        lambda preset_id, env=None: ["sonnet"] if preset_id == "anthropic" else ["mock-model"],
+        lambda preset_id, env=None, force_refresh=False: ["sonnet"] if preset_id == "anthropic" else ["mock-model"],
     )
     app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
     client = TestClient(app)
@@ -343,7 +599,7 @@ def test_api_rejects_inactive_default_model_selection(tmp_path: Path, monkeypatc
 
 
 def test_api_allows_curated_model_when_live_validation_returns_none(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(main_module, "active_models_for_preset", lambda preset_id, env=None: [])
+    monkeypatch.setattr(model_catalog, "active_models_for_preset", lambda preset_id, env=None, force_refresh=False: [])
     app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
     client = TestClient(app)
 
@@ -352,7 +608,7 @@ def test_api_allows_curated_model_when_live_validation_returns_none(tmp_path: Pa
         json={
             "topic": "Should teams allow agents to negotiate?",
             "agents": [
-                {"display_name": "Athena", "preset_id": "openai", "model_name": "gpt-5"},
+                {"display_name": "Athena", "preset_id": "openai", "model_name": "gpt-5.4"},
                 {"display_name": "Burke", "preset_id": "mock", "model_name": "mock-model"},
             ],
             "judge": {"display_name": "Solon", "preset_id": "mock", "model_name": "mock-model"},
@@ -363,7 +619,7 @@ def test_api_allows_curated_model_when_live_validation_returns_none(tmp_path: Pa
 
 
 def test_presets_expose_fallback_models_even_when_cli_is_unavailable(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(main_module, "active_models_for_preset", lambda preset_id, env=None: [])
+    monkeypatch.setattr(model_catalog, "active_models_for_preset", lambda preset_id, env=None, force_refresh=False: [])
     monkeypatch.setattr(
         main_module,
         "visible_presets",
