@@ -189,13 +189,13 @@ def test_storage_session_metadata_roundtrip(tmp_path: Path) -> None:
     debater = next(agent for agent in session["agents"] if agent["role"] == "debater")
     updated = storage.update_session_metadata(
         session["id"],
-        debate_mode="serious",
+        debate_mode="conversational",
         topic_type="Product",
         topic_tags=["roadmap"],
         debater_sentiments={debater["id"]: "skeptical"},
     )
 
-    assert updated["debate_mode"] == "serious"
+    assert updated["debate_mode"] == "conversational"
     assert updated["topic_type"] == "Product"
     assert updated["topic_tags"] == ["roadmap"]
     updated_debater = next(agent for agent in updated["agents"] if agent["id"] == debater["id"])

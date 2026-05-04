@@ -2,6 +2,7 @@ const SAMPLE_NAMES = ["Athena", "Burke", "Cassius", "Diotima", "Erasmus"];
 const SAMPLE_PRESETS = ["openai", "anthropic", "openai", "anthropic", "gemini"];
 const DEBATE_MODES = [
   { value: "theater", label: "Theater & Delight" },
+  { value: "conversational", label: "Conversational" },
   { value: "serious", label: "Serious Analysis" },
 ];
 const TOPIC_TYPES = ["AI & Technology", "Policy", "Ethics", "Product", "Science", "Culture", "Other"];

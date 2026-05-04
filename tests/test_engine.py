@@ -233,6 +233,64 @@ def test_engine_runs_segment_then_pauses(tmp_path: Path) -> None:
     assert len(continued["rounds"]) == 5
 
 
+def test_engine_uses_more_reply_rounds_for_conversational_mode(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
+    broker = EventBroker()
+    engine = DebateEngine(storage=storage, broker=broker)
+
+    session = storage.create_session(
+        "Should debaters respond more conversationally?",
+        [
+            {
+                "display_name": "Athena",
+                "role": "debater",
+                "side": "independent",
+                "persona_id": "stoic_rationalist",
+                "preset_id": "mock",
+                "model_name": "mock-pro",
+                "command": ["mock"],
+                "args_template": [],
+                "env": {},
+            },
+            {
+                "display_name": "Burke",
+                "role": "debater",
+                "side": "independent",
+                "persona_id": "pragmatic_engineer",
+                "preset_id": "mock",
+                "model_name": "mock-con",
+                "command": ["mock"],
+                "args_template": [],
+                "env": {},
+            },
+        ],
+        {
+            "display_name": "Solon",
+            "role": "judge",
+            "side": "judge",
+            "preset_id": "mock",
+            "model_name": "mock-judge",
+            "command": ["mock"],
+            "args_template": [],
+            "env": {},
+        },
+        debate_mode="conversational",
+    )
+
+    asyncio.run(engine.run_segment(session["id"]))
+    result = storage.get_session(session["id"])
+
+    assert result["status"] == "awaiting_continue"
+    assert len(result["messages"]) == 10
+    assert len(result["rounds"]) == 5
+
+    asyncio.run(engine.run_segment(session["id"]))
+    continued = storage.get_session(session["id"])
+    assert continued["status"] == "awaiting_continue"
+    assert len(continued["messages"]) == 18
+    assert len(continued["rounds"]) == 9
+
+
 def test_visible_presets_can_expose_mock_backend_for_hosted_demo(monkeypatch) -> None:
     monkeypatch.setenv("LLM_DEBATE_HALL_ENABLE_MOCK_PRESET", "true")
     monkeypatch.setattr(model_catalog.shutil, "which", lambda _: None)

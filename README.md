@@ -9,7 +9,7 @@ It is built for a very specific kind of experiment: using the local tools you al
 ## Why It Stands Out
 
 - Local-first by default: provider CLIs, auth, storage, and transcripts stay on your machine
-- Structured debates instead of raw chat panes: opening rounds, replies, pause/continue flow, and judging
+- Structured debates instead of raw chat panes: opening rounds, reply cycles, conversational mode, pause/continue flow, and judging
 - Persona-driven seats: each debater can argue from a distinct philosophical frame or operational style
 - Transcript-first design: debates are persisted, recoverable, and inspectable after the live run
 - Real-provider smoke testing: the repo can now validate a full 3-debater live debate path end to end
@@ -21,10 +21,11 @@ It is built for a very specific kind of experiment: using the local tools you al
 - Persona intensity controls so the same persona can play subtly or aggressively without cloning it
 - Persona draft generation from a freeform description, then save-as-custom in the library
 - Visible auto-persona selection before opening statements
+- Debate modes for serious analysis, theatrical style, or shorter conversational back-and-forth
 - Single-paragraph turn flow with pause/continue controls
 - Transcript-first Arena updates with persisted session recovery
 - Persistent per-debater provider threads where supported
-- Replay fallback when a provider cannot resume cleanly
+- Replay fallback when a provider cannot resume cleanly, including transient Claude session-lock failures
 - Arena observability with per-turn latency, provider/model, fallback state, token estimates, and a timeline
 - Structured trace export for later analysis
 - Local SQLite storage for sessions, messages, and scores
