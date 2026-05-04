@@ -43,6 +43,11 @@ from llm_debate_hall.provider_sessions import ProviderSessionService
 from llm_debate_hall.storage import Storage
 
 REPLY_ROUNDS_PER_CYCLE = 2
+REPLY_ROUNDS_PER_CYCLE_BY_MODE = {
+    "serious": 2,
+    "theater": 2,
+    "conversational": 4,
+}
 PERSONA_SELECTION_STATUS = "selecting_personas"
 
 # Compatibility aliases for older tests and local imports that reached into engine internals.
@@ -140,7 +145,7 @@ class DebateEngine:
                     round_index=next_round_index,
                 )
 
-            for _ in range(REPLY_ROUNDS_PER_CYCLE):
+            for _ in range(self._reply_rounds_per_cycle(session)):
                 next_round_index = await self._play_round(
                     session_id=session_id,
                     topic=session["topic"],
@@ -433,6 +438,9 @@ class DebateEngine:
         if not session["rounds"]:
             return 1
         return max(round_item["round_index"] for round_item in session["rounds"]) + 1
+
+    def _reply_rounds_per_cycle(self, session: dict[str, Any]) -> int:
+        return REPLY_ROUNDS_PER_CYCLE_BY_MODE.get(session.get("debate_mode"), REPLY_ROUNDS_PER_CYCLE)
 
     def _persona_selection_text(self, auto_agents: list[dict[str, Any]]) -> str:
         return persona_selection_text(auto_agents)

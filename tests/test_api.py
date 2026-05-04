@@ -375,7 +375,7 @@ def test_api_session_workspace_metadata_roundtrip_and_patch(tmp_path: Path) -> N
     patched = client.patch(
         f"/api/sessions/{session['id']}/metadata",
         json={
-            "debate_mode": "serious",
+            "debate_mode": "conversational",
             "topic_type": "Product",
             "topic_tags": ["roadmap"],
             "debater_sentiments": {debater["id"]: "skeptical"},
@@ -384,7 +384,7 @@ def test_api_session_workspace_metadata_roundtrip_and_patch(tmp_path: Path) -> N
 
     assert patched.status_code == 200
     payload = patched.json()
-    assert payload["debate_mode"] == "serious"
+    assert payload["debate_mode"] == "conversational"
     assert payload["topic_type"] == "Product"
     assert payload["topic_tags"] == ["roadmap"]
     updated_debater = next(agent for agent in payload["agents"] if agent["id"] == debater["id"])

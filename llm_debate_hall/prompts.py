@@ -12,6 +12,15 @@ ROUND_INSTRUCTIONS = {
     "opening": "State your position in exactly one concise paragraph.",
     "reply": "Respond to the chamber in exactly one concise paragraph.",
 }
+CONVERSATIONAL_ROUND_INSTRUCTIONS = {
+    "opening": "State your position in 2-3 direct, conversational sentences.",
+    "reply": "Respond to the latest relevant point in 2-4 direct, conversational sentences.",
+}
+STYLE_CONSTRAINT = "Return exactly one paragraph."
+CONVERSATIONAL_STYLE_CONSTRAINT = (
+    "Write like a sharp group chat, not an essay. Engage the latest relevant point directly, "
+    "name another debater when useful, and ask at most one concise question."
+)
 
 
 def persona_intensity_value(agent: dict[str, Any]) -> float:
@@ -63,17 +72,19 @@ def build_turn_prompt(
     transcript = summarize_messages(session)
     persona = _persona_for_agent(personas, agent)
     intensity = persona_intensity_value(agent)
+    debate_mode = _debate_mode(session)
     return (
         "You are participating in a structured debate.\n"
         f"TOPIC: {topic}\n"
+        f"DEBATE MODE: {debate_mode}\n"
         f"ROUND: {round_type}\n"
         f"PERSONA: {persona['name']} | {persona['style']}\n"
         f"PERSONA INTENSITY: {intensity:.2f}\n"
         f"INTENSITY GUIDANCE: {persona_intensity_guidance(intensity)}\n"
         f"VALUES: {', '.join(persona['core_values'])}\n"
         f"RULES: {', '.join(persona['debate_rules'])}\n"
-        f"INSTRUCTION: {ROUND_INSTRUCTIONS[round_type]}\n"
-        "STYLE CONSTRAINT: Return exactly one paragraph.\n"
+        f"INSTRUCTION: {_round_instruction(round_type, debate_mode)}\n"
+        f"STYLE CONSTRAINT: {_style_constraint(debate_mode)}\n"
         "TRANSCRIPT SUMMARY:\n"
         f"{transcript}\n"
         "Return JSON with keys: display_text, claim, reasoning, attack, question, confidence"
@@ -95,17 +106,19 @@ def build_persistent_turn_prompt(
     persona = _persona_for_agent(personas, agent)
     intensity = persona_intensity_value(agent)
     updates = summarize_messages_since_last_turn(session, agent["id"])
+    debate_mode = _debate_mode(session)
     return (
         "You are continuing the same structured debate session.\n"
         f"TOPIC: {topic}\n"
+        f"DEBATE MODE: {debate_mode}\n"
         f"ROUND: {round_type}\n"
         f"PERSONA: {persona['name']} | {persona['style']}\n"
         f"PERSONA INTENSITY: {intensity:.2f}\n"
         f"INTENSITY GUIDANCE: {persona_intensity_guidance(intensity)}\n"
         f"VALUES: {', '.join(persona['core_values'])}\n"
         f"RULES: {', '.join(persona['debate_rules'])}\n"
-        f"INSTRUCTION: {ROUND_INSTRUCTIONS[round_type]}\n"
-        "STYLE CONSTRAINT: Return exactly one paragraph.\n"
+        f"INSTRUCTION: {_round_instruction(round_type, debate_mode)}\n"
+        f"STYLE CONSTRAINT: {_style_constraint(debate_mode)}\n"
         "NEW CHAMBER UPDATES SINCE YOUR LAST TURN:\n"
         f"{updates}\n"
         "Return JSON with keys: display_text, claim, reasoning, attack, question, confidence"
@@ -182,6 +195,25 @@ def persona_selection_text(auto_agents: list[dict[str, Any]]) -> str:
 
 def _persona_for_agent(personas: list[dict[str, Any]], agent: dict[str, Any]) -> dict[str, Any]:
     return next(persona for persona in personas if persona["id"] == agent["persona_id"])
+
+
+def _debate_mode(session: dict[str, Any]) -> str:
+    raw = session.get("debate_mode")
+    if raw in {"conversational", "theater", "serious"}:
+        return raw
+    return "serious"
+
+
+def _round_instruction(round_type: str, debate_mode: str) -> str:
+    if debate_mode == "conversational":
+        return CONVERSATIONAL_ROUND_INSTRUCTIONS[round_type]
+    return ROUND_INSTRUCTIONS[round_type]
+
+
+def _style_constraint(debate_mode: str) -> str:
+    if debate_mode == "conversational":
+        return CONVERSATIONAL_STYLE_CONSTRAINT
+    return STYLE_CONSTRAINT
 
 
 def _format_conversation_entry(item: dict[str, Any]) -> str:

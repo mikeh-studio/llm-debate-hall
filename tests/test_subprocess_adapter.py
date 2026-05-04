@@ -299,3 +299,92 @@ def test_anthropic_persistent_timeout_allows_stateless_fallback(monkeypatch) -> 
         raise AssertionError("Expected anthropic persistent timeout to allow stateless fallback.")
 
     assert process.killed is True
+
+
+def test_anthropic_persistent_session_in_use_retries_then_succeeds(monkeypatch) -> None:
+    class Process:
+        def __init__(self, *, returncode: int, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+        async def communicate(self, stdin=None):
+            return self.stdout.encode(), self.stderr.encode()
+
+    processes = [
+        Process(returncode=1, stderr="Error: Session ID claude-session-1 is already in use."),
+        Process(
+            returncode=0,
+            stdout='{"display_text":"Recovered after session lock.","claim":"ok","reasoning":[],"attack":"","question":"","confidence":0.6}',
+        ),
+    ]
+    calls: list[tuple[str, ...]] = []
+    chunks: list[str] = []
+    adapter = SubprocessDebateAdapter()
+
+    async def on_chunk(chunk: str) -> None:
+        chunks.append(chunk)
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        calls.append(tuple(args))
+        return processes.pop(0)
+
+    monkeypatch.setattr(subprocess_adapter, "ANTHROPIC_SESSION_IN_USE_RETRY_DELAYS_SECONDS", (0,))
+    monkeypatch.setattr(subprocess_adapter.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = asyncio.run(
+        adapter.generate_persistent(
+            make_request(
+                preset_id="anthropic",
+                command=["claude"],
+                model_name="opus",
+                output_mode="reply",
+            ),
+            "claude-session-1",
+            on_chunk,
+        )
+    )
+
+    assert len(calls) == 2
+    assert result.provider_session_id == "claude-session-1"
+    assert "Recovered after session lock." in result.response.raw_text
+    assert chunks
+
+
+def test_anthropic_persistent_session_in_use_allows_stateless_fallback(monkeypatch) -> None:
+    class BusyProcess:
+        returncode = 1
+
+        async def communicate(self, stdin=None):
+            return b"", b"Error: Session ID claude-session-1 is already in use."
+
+    adapter = SubprocessDebateAdapter()
+
+    async def on_chunk(_chunk: str) -> None:
+        return None
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return BusyProcess()
+
+    monkeypatch.setattr(subprocess_adapter, "ANTHROPIC_SESSION_IN_USE_RETRY_DELAYS_SECONDS", ())
+    monkeypatch.setattr(subprocess_adapter.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    try:
+        asyncio.run(
+            adapter.generate_persistent(
+                make_request(
+                    preset_id="anthropic",
+                    command=["claude"],
+                    model_name="opus",
+                    output_mode="reply",
+                ),
+                "claude-session-1",
+                on_chunk,
+            )
+        )
+    except SubprocessAdapterError as exc:
+        assert exc.allow_stateless_fallback is True
+        assert "already in use" in str(exc)
+        assert "anthropic model `opus` failed" in str(exc)
+    else:
+        raise AssertionError("Expected session-in-use failure to allow stateless fallback.")

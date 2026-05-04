@@ -58,6 +58,7 @@ GENERATION_TIMEOUT_SECONDS = int(os.environ.get("LLM_DEBATE_HALL_GENERATION_TIME
 ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS = int(
     os.environ.get("LLM_DEBATE_HALL_ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS", "300")
 )
+ANTHROPIC_SESSION_IN_USE_RETRY_DELAYS_SECONDS = (0.5, 1.0)
 _PROBE_CACHE: dict[str, tuple[float, list[str]]] = {}
 _CATALOG_CACHE: dict[str, tuple[float, list[str]]] = {}
 _PROBE_CACHE_LOCK = threading.Lock()
@@ -125,6 +126,11 @@ def _classify_provider_issue(text: str) -> str | None:
     if any(marker in lowered for marker in AUTH_ERROR_MARKERS):
         return "auth_error"
     return None
+
+
+def _is_provider_session_in_use_error(text: str) -> bool:
+    lowered = text.lower()
+    return "session id" in lowered and "already in use" in lowered
 
 
 def _build_process_error(request: AdapterRequest, raw_text: str) -> str:
@@ -618,33 +624,46 @@ class SubprocessDebateAdapter(DebateAdapter):
     ) -> PersistentAdapterResponse:
         next_provider_session_id = provider_session_id or str(uuid.uuid4())
         command = build_claude_persistent_command(request, next_provider_session_id)
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_merged_env(request.env),
-            start_new_session=True,
-        )
         timeout_context = (
             "while resuming a persistent provider session"
             if provider_session_id
             else "while starting a persistent provider session"
         )
-        stdout, stderr = await self._communicate_with_timeout(
-            process,
-            request,
-            timeout_seconds=_timeout_seconds_for_request(request, persistent=True),
-            timeout_context=timeout_context,
-            allow_stateless_fallback=True,
-        )
-        raw_stdout = stdout.decode("utf-8", errors="replace").strip()
-        stderr_text = stderr.decode("utf-8", errors="replace").strip()
-        if process.returncode != 0:
+        retry_delays = (0.0, *ANTHROPIC_SESSION_IN_USE_RETRY_DELAYS_SECONDS)
+
+        for attempt_index, retry_delay in enumerate(retry_delays):
+            if retry_delay:
+                await asyncio.sleep(retry_delay)
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=_merged_env(request.env),
+                start_new_session=True,
+            )
+            stdout, stderr = await self._communicate_with_timeout(
+                process,
+                request,
+                timeout_seconds=_timeout_seconds_for_request(request, persistent=True),
+                timeout_context=timeout_context,
+                allow_stateless_fallback=True,
+            )
+            raw_stdout = stdout.decode("utf-8", errors="replace").strip()
+            stderr_text = stderr.decode("utf-8", errors="replace").strip()
+            if process.returncode == 0:
+                response = await self._emit_response(raw_stdout, request, on_chunk)
+                return PersistentAdapterResponse(response=response, provider_session_id=next_provider_session_id)
+
             raw_text = raw_stdout or stderr_text or f"Command exited with {process.returncode}"
-            raise SubprocessAdapterError(_build_process_error(request, raw_text))
-        response = await self._emit_response(raw_stdout, request, on_chunk)
-        return PersistentAdapterResponse(response=response, provider_session_id=next_provider_session_id)
+            session_in_use = _is_provider_session_in_use_error(raw_text)
+            has_retry_left = attempt_index < len(retry_delays) - 1
+            if session_in_use and has_retry_left:
+                continue
+            raise SubprocessAdapterError(
+                _build_process_error(request, raw_text),
+                allow_stateless_fallback=session_in_use,
+            )
 
     async def _emit_response(self, raw_text: str, request: AdapterRequest, on_chunk: ChunkCallback) -> AdapterResponse:
         display_text = _validate_success_output(raw_text, request)

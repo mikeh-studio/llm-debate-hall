@@ -66,6 +66,23 @@ def test_turn_prompt_includes_persona_intensity_without_brittle_full_text() -> N
     assert "No prior turns." in prompt
 
 
+def test_conversational_turn_prompt_uses_chat_style_constraints() -> None:
+    session = {"debate_mode": "conversational", "thread_entries": [], "messages": []}
+    agent = {
+        "id": "agent-1",
+        "display_name": "Athena",
+        "persona_id": "stoic_rationalist",
+        "persona_intensity": 1.0,
+    }
+
+    prompt = build_turn_prompt(session, "Should debaters talk more naturally?", agent, "reply", PERSONAS)
+
+    assert "DEBATE MODE: conversational" in prompt
+    assert "2-4 direct, conversational sentences" in prompt
+    assert "sharp group chat" in prompt
+    assert "ask at most one concise question" in prompt
+
+
 def test_persistent_reply_prompt_uses_updates_since_agent_last_turn() -> None:
     session = {
         "thread_entries": [
@@ -124,3 +141,47 @@ def test_persistent_reply_prompt_uses_updates_since_agent_last_turn() -> None:
     assert "Burke new chamber update." in prompt
     assert "Athena old claim." not in prompt
     assert "Old moderator note." not in prompt
+
+
+def test_conversational_persistent_reply_prompt_uses_chat_style_constraints() -> None:
+    session = {
+        "debate_mode": "conversational",
+        "thread_entries": [
+            {
+                "kind": "agent",
+                "display_name": "Athena",
+                "display_text": "Athena old claim.",
+                "round_type": "opening",
+                "round_index": 1,
+                "agent_id": "agent-1",
+            },
+            {
+                "kind": "agent",
+                "display_name": "Burke",
+                "display_text": "Burke latest point.",
+                "round_type": "reply",
+                "round_index": 2,
+                "agent_id": "agent-2",
+            },
+        ],
+        "messages": [],
+    }
+    agent = {
+        "id": "agent-1",
+        "display_name": "Athena",
+        "persona_id": "stoic_rationalist",
+        "persona_intensity": 1.0,
+    }
+
+    prompt = build_persistent_turn_prompt(
+        session=session,
+        topic="Should persistent debates feel conversational?",
+        agent=agent,
+        round_type="reply",
+        provider_session={"mode": "persistent", "status": "active"},
+        personas=PERSONAS,
+    )
+
+    assert "DEBATE MODE: conversational" in prompt
+    assert "latest relevant point" in prompt
+    assert "Burke latest point." in prompt

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-DEBATE_MODES = {"theater", "serious"}
+DEBATE_MODES = {"conversational", "theater", "serious"}
 DEFAULT_DEBATE_MODE = "serious"
 
 TOPIC_TYPES = [
