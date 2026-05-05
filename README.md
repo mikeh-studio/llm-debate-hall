@@ -2,7 +2,7 @@
 
 ![LLM Debate Hall header](llm_debate_hall/static/llm-debate-hall-header_2.png)
 
-LLM Debate Hall is a local-first FastAPI app for running structured multi-agent debates with real model CLIs, persistent transcripts, and persona-driven debaters. Give several agents a question, cast each one as a distinct philosophy or style, and watch the debate unfold as one continuous Arena thread instead of a pile of disconnected model outputs.
+LLM Debate Hall is a local-first FastAPI app for running structured multi-agent debates with real model CLIs, persistent transcripts, and persona-driven debaters. Give several agents a question, cast each one as a distinct philosophy or style, and watch the debate unfold as one continuous Chamber thread instead of a pile of disconnected model outputs.
 
 It is built for a very specific kind of experiment: using the local tools you already trust, keeping the debate state on your machine, and making the whole exchange inspectable enough to replay, judge, and test. The result sits somewhere between an AI toy, a debate simulator, and a local developer tool for probing how different model backends reason under pressure.
 
@@ -16,14 +16,15 @@ It is built for a very specific kind of experiment: using the local tools you al
 
 ## What It Can Do
 
-- Arena-style setup for 2 to 5 debaters plus a judge
+- Single Chamber page for setup, live arena state, and transcript controls
 - Per-seat model, provider, and persona configuration
 - Persona intensity controls so the same persona can play subtly or aggressively without cloning it
 - Persona draft generation from a freeform description, then save-as-custom in the library
-- Visible auto-persona selection before opening statements
+- Visible auto-persona selection before opening statements, with timeout failures persisted into the run
 - Debate modes for serious analysis, theatrical style, or shorter conversational back-and-forth
 - Single-paragraph turn flow with pause/continue controls
-- Transcript-first Arena updates with persisted session recovery
+- Transcript-first live updates with persisted session recovery
+- Refresh control to clear the current run from the Chamber while keeping the saved session
 - Persistent per-debater provider threads where supported
 - Replay fallback when a provider cannot resume cleanly, including transient Claude session-lock failures
 - Arena observability with per-turn latency, provider/model, fallback state, token estimates, and a timeline
@@ -40,21 +41,21 @@ Anthropic readiness requires more than the `claude` binary being installed. The 
 
 ## Current UI
 
-### Setup
+### Chamber
 
-The setup screen lets you configure a topic, 2 to 5 debaters, per-seat personas, and the judge before the chamber starts.
+The Chamber keeps setup and the live arena on one page: configure the topic, debaters, per-seat personas, and judge on the left, then watch the phase rail, live speaker, transcript, and controls update on the right.
 
 ![Setup screen](llm_debate_hall/static/setup_page.png)
 
 ### Pixel Stage Arena
 
-The Arena now includes an alternate Pixel Stage presentation mode that keeps the full transcript as the source of truth while rendering the current speakers as retro RPG-style sprites with a live speech bubble.
+The Chamber includes an alternate Pixel Stage presentation mode that keeps the full transcript as the source of truth while rendering the current speakers as retro RPG-style sprites with a live speech bubble.
 
 ![Pixel Stage Arena](llm_debate_hall/static/arena.png)
 
 ### Personas And Arena Theme
 
-Personas remain editable in the app, and the Arena supports a dark theme for longer debate sessions.
+Personas remain editable in the app, and the Chamber supports a dark theme for longer debate sessions.
 
 ![Personas in dark mode](docs/screenshots/personas_dark_mode.png)
 
@@ -81,9 +82,13 @@ PYTHONPYCACHEPREFIX=/tmp/llm-debate-hall-pyc python3 -m compileall llm_debate_ha
 ```
 
 For UI or orchestration changes, also test the live app in the browser at `http://127.0.0.1:8000`.
-When validating debate startup, confirm the Arena shows the persona-selection phase or the transcript itself instead of staying blank after `Start Debate`.
-For observability changes, verify the Arena trace timeline and `Trace JSON` export reflect the same session state.
+When validating debate startup, confirm the Chamber shows persona selection, the active speaker, or transcript entries instead of staying blank after `Start Debate`.
+For observability changes, verify the Chamber trace timeline and `Trace JSON` export reflect the same session state.
 For persona workflow changes, verify persona generation, icon rendering, and save/edit flows in the Personas view.
+
+## Local Session Data
+
+Runtime sessions are stored in local SQLite files such as `llm_debate_hall.db`. Those files, SQLite sidecars, and local `sessions/` directories are ignored by `.gitignore`; do not commit saved debate runs or exported local evidence unless a test fixture explicitly requires it.
 
 ## Live Debate Smoke Test
 
@@ -105,7 +110,7 @@ The runner requires at least one validated real provider from the built-in `open
 ## Project Layout
 
 - `llm_debate_hall/` FastAPI app, debate engine, storage, adapters
-- `llm_debate_hall/static/` arena UI
+- `llm_debate_hall/static/` Chamber UI
 - `tests/` API, engine, storage, and adapter tests
 
 ## Status
