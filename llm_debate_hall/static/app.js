@@ -28,11 +28,15 @@ const DRAFT_STORAGE_KEY = "llm-debate-hall:draft:v1";
 const ARENA_PRESENTATION_STORAGE_KEY = "llm-debate-hall:arena-presentation:v1";
 const SESSION_SYNC_TIMEOUT_MS = 8000;
 const SESSION_SYNC_INTERVAL_MS = 250;
+const ACTIVE_SESSION_POLL_INTERVAL_MS = 3000;
+const LIVE_SESSION_STATUSES = ["selecting_personas", "running"];
 
 const state = {
   presets: [],
   modelLookups: {},
   modelLookupTimers: {},
+  activeSessionPollTimer: null,
+  activeSessionPollFailures: 0,
   personas: [],
   sessions: [],
   activeView: "setup",
@@ -312,6 +316,87 @@ function setArenaFeedback(message = "", kind = "") {
 function setPersonaFeedback(message = "", kind = "") {
   state.personaFeedback = message;
   state.personaFeedbackKind = kind;
+}
+
+function sessionFailureMessage(session) {
+  const entries = [...(session?.thread_entries || [])].reverse();
+  const failedEntry = entries.find(
+    (entry) => entry.kind === "system" && entry.payload?.event === "session_failed" && entry.display_text
+  );
+  return failedEntry?.display_text || "";
+}
+
+function liveSessionNeedsPolling(session = state.activeSession) {
+  return Boolean(session && LIVE_SESSION_STATUSES.includes(session.status));
+}
+
+function clearActiveSessionPoll() {
+  if (state.activeSessionPollTimer) {
+    window.clearTimeout(state.activeSessionPollTimer);
+    state.activeSessionPollTimer = null;
+  }
+}
+
+function closeActiveSocket() {
+  if (state.socket) {
+    state.socket.close();
+    state.socket = null;
+  }
+}
+
+function clearCurrentRun({ feedbackMessage = "Run cleared. Setup is ready for another debate." } = {}) {
+  const session = state.activeSession;
+  if (session) {
+    applySessionToDraft(session);
+    $("main-composer").value = session.topic;
+  }
+  closeActiveSocket();
+  clearActiveSessionPoll();
+  state.activeSessionId = null;
+  state.activeSession = null;
+  state.activeSessionPollFailures = 0;
+  state.threadEntries = [];
+  state.traceEvents = [];
+  state.pendingThreadEntry = null;
+  state.questionSuggestions = [];
+  persistDraft();
+  setArenaFeedback(feedbackMessage, "success");
+  renderArena();
+  setView("setup");
+}
+
+function scheduleActiveSessionPoll() {
+  clearActiveSessionPoll();
+  if (!state.activeSessionId || !liveSessionNeedsPolling()) return;
+  state.activeSessionPollTimer = window.setTimeout(async () => {
+    state.activeSessionPollTimer = null;
+    const sessionId = state.activeSessionId;
+    if (!sessionId || !liveSessionNeedsPolling()) return;
+    try {
+      const session = await loadSession(sessionId, {
+        reconnect: false,
+        clearFeedback: false,
+        setArenaView: false,
+        schedulePoll: false,
+      });
+      state.activeSessionPollFailures = 0;
+      if (session.status === "failed") {
+        setArenaFeedback(sessionFailureMessage(session) || "Debate failed.", "error");
+        renderArena();
+      }
+    } catch (error) {
+      console.error(error);
+      state.activeSessionPollFailures += 1;
+      if (state.activeSessionPollFailures >= 2) {
+        setArenaFeedback(`Could not sync the live run: ${error.message || "connection failed"}`, "error");
+        renderArena();
+      }
+    } finally {
+      if (state.activeSessionId === sessionId && liveSessionNeedsPolling()) {
+        scheduleActiveSessionPoll();
+      }
+    }
+  }, ACTIVE_SESSION_POLL_INTERVAL_MS);
 }
 
 function personaOptions(selectedValue = "auto") {
@@ -703,9 +788,10 @@ function renderArenaHeader() {
   $("arena-status").textContent = label;
   $("arena-subtitle").textContent = state.activeSession
     ? `${debateModeLabel(state.activeSession.debate_mode)} · ${state.activeSession.topic_type || "Other"}`
-    : "Configure debaters in Setup, then start the debate.";
+    : "Configure the council on the left, then start the debate.";
   const sessionPill = $("active-session-pill");
   if (sessionPill) sessionPill.textContent = state.activeSession ? `${topic} · ${label}` : "";
+  $("refresh-run").disabled = !state.activeSessionId;
   $("export-session").disabled = !state.activeSessionId;
   $("export-trace").disabled = !state.activeSessionId;
   const composerShell = $("arena-composer-shell");
@@ -752,15 +838,20 @@ function renderArenaPhaseRail() {
 
 function applyArenaMotionState() {
   const arena = document.querySelector(".debate-mockup");
+  const workbench = document.querySelector(".chamber-workbench");
   if (!arena) return;
   const phase = currentArenaPhase();
   arena.classList.toggle("is-opening", state.startInFlight && !state.activeSession);
   arena.classList.toggle("is-live", ["personas", "opening", "replies", "continue", "judging"].includes(phase));
   arena.classList.toggle("is-resolved", phase === "complete");
+  if (workbench) {
+    workbench.classList.toggle("has-active-session", Boolean(state.activeSession));
+    workbench.classList.toggle("has-live-session", liveSessionNeedsPolling());
+  }
 }
 
 function currentSpeakerEntry() {
-  syncPredictedPendingEntry();
+  syncPendingSpeakerEntry();
   if (state.pendingThreadEntry && ["agent", "judge"].includes(state.pendingThreadEntry.kind)) {
     return state.pendingThreadEntry;
   }
@@ -787,22 +878,41 @@ function renderLiveSpeakerStrip() {
     return;
   }
 
+  if (state.activeSession?.status === "selecting_personas") {
+    const waitingDebaters = currentDebaters().filter((agent) => !agent.persona_id);
+    const names = waitingDebaters.map((agent) => agent.display_name).join(", ") || "the debaters";
+    strip.innerHTML = `
+      <div class="live-speaker-card is-live">
+        <span class="live-speaker-kicker">Personas</span>
+        <strong>Selecting personas</strong>
+        <span>Debate Hall</span>
+        <div class="live-speaker-preview">${thinkingDotsMarkup(`Selecting personas for ${names}`)}</div>
+      </div>
+    `;
+    return;
+  }
+
   const entry = currentSpeakerEntry();
   const phase = ARENA_PHASES.find((item) => item.id === currentArenaPhase())?.label || "Arena";
   const isThinking = Boolean(entry?.pending && !String(entry.display_text || "").trim());
-  const speakerName = entry?.display_name || (state.startInFlight ? "Debate Hall" : "Waiting for speaker");
+  const waitingForLiveSpeaker = Boolean(state.activeSession?.status === "running" && !entry);
+  const speakerName = entry?.display_name || "Debate Hall";
   const speakerRole = entry ? threadEntryRoleLabel(entry) : phase;
   const preview = entry?.display_text
     ? truncateStageBubble(entry.display_text, 110)
     : state.startInFlight
       ? "Opening the chamber..."
-      : "The next speaker is getting ready.";
+      : waitingForLiveSpeaker
+        ? "Preparing the next live turn..."
+        : "The next speaker is getting ready.";
   strip.innerHTML = `
-    <div class="live-speaker-card ${entry?.pending || state.startInFlight ? "is-live" : ""}">
+    <div class="live-speaker-card ${entry?.pending || state.startInFlight || waitingForLiveSpeaker ? "is-live" : ""}">
       <span class="live-speaker-kicker">${escapeHtml(phase)}</span>
       <strong>${escapeHtml(speakerName)}</strong>
       <span>${escapeHtml(speakerRole)}</span>
-      <div class="live-speaker-preview">${isThinking ? thinkingDotsMarkup(`${speakerName} is thinking`) : escapeHtml(preview)}</div>
+      <div class="live-speaker-preview">${
+        isThinking || waitingForLiveSpeaker ? thinkingDotsMarkup(`${speakerName} is preparing`) : escapeHtml(preview)
+      }</div>
     </div>
   `;
 }
@@ -1050,15 +1160,60 @@ function activeRoundForPendingSpeaker() {
     .find((round) => !round.completed_at) || null;
 }
 
+function turnTraceKey(event) {
+  return [event.agent_id || "", event.round_type || "", event.round_index ?? ""].join(":");
+}
+
+function latestOpenTurnTraceEvent() {
+  if (state.activeSession?.status !== "running") return null;
+  const completedTurns = new Set(
+    state.traceEvents
+      .filter((event) => event.event_type === "turn_completed")
+      .map((event) => turnTraceKey(event))
+  );
+  return [...state.traceEvents]
+    .reverse()
+    .find((event) => event.event_type === "turn_started" && !completedTurns.has(turnTraceKey(event))) || null;
+}
+
+function traceAgentName(event) {
+  return state.activeSession?.agents?.find((agent) => agent.id === event.agent_id)?.display_name || "Speaker";
+}
+
+function buildTracePendingEntry(event) {
+  return {
+    id: `trace-${event.round_type}-${event.round_index}-${event.agent_id}`,
+    kind: "agent",
+    display_name: traceAgentName(event),
+    display_text: "",
+    round_type: event.round_type,
+    round_index: event.round_index,
+    agent_id: event.agent_id,
+    payload: { local: true, traceStarted: true },
+    created_at: event.created_at || new Date().toISOString(),
+    pending: true,
+  };
+}
+
+function completedThreadAgentIds(roundIndex) {
+  return state.threadEntries
+    .filter((entry) => entry.kind === "agent" && entry.round_index === roundIndex && entry.agent_id)
+    .map((entry) => entry.agent_id);
+}
+
+function completedTraceAgentIds(roundIndex) {
+  return state.traceEvents
+    .filter((event) => event.event_type === "turn_completed" && event.round_index === roundIndex && event.agent_id)
+    .map((event) => event.agent_id);
+}
+
 function buildPredictedDebaterPendingEntry() {
   if (!state.activeSession || state.activeSession.status !== "running") return null;
   const activeRound = activeRoundForPendingSpeaker();
   if (!activeRound) return null;
 
   const spokenAgentIds = new Set(
-    state.threadEntries
-      .filter((entry) => entry.kind === "agent" && entry.round_index === activeRound.round_index && entry.agent_id)
-      .map((entry) => entry.agent_id)
+    [...completedThreadAgentIds(activeRound.round_index), ...completedTraceAgentIds(activeRound.round_index)]
   );
   const nextDebater = currentDebaters().find((agent) => agent.id && !spokenAgentIds.has(agent.id));
   if (!nextDebater) return null;
@@ -1075,6 +1230,29 @@ function buildPredictedDebaterPendingEntry() {
     created_at: new Date().toISOString(),
     pending: true,
   };
+}
+
+function syncTracePendingEntry() {
+  const hasNonLocalPending =
+    state.pendingThreadEntry &&
+    !state.pendingThreadEntry.payload?.predicted &&
+    !state.pendingThreadEntry.payload?.traceStarted;
+  if (hasNonLocalPending) {
+    return;
+  }
+
+  const traceEvent = latestOpenTurnTraceEvent();
+  if (traceEvent) {
+    const pending = buildTracePendingEntry(traceEvent);
+    if (!state.pendingThreadEntry || state.pendingThreadEntry.id !== pending.id) {
+      state.pendingThreadEntry = pending;
+    }
+    return;
+  }
+
+  if (state.pendingThreadEntry?.payload?.traceStarted) {
+    state.pendingThreadEntry = null;
+  }
 }
 
 function syncPredictedPendingEntry() {
@@ -1095,6 +1273,11 @@ function syncPredictedPendingEntry() {
   }
 }
 
+function syncPendingSpeakerEntry() {
+  syncTracePendingEntry();
+  syncPredictedPendingEntry();
+}
+
 function threadEntryRoleLabel(entry) {
   if (entry.kind === "moderator") return "Moderator";
   if (entry.kind === "judge") return "Judge";
@@ -1111,7 +1294,7 @@ function thinkingDotsMarkup(label = "Waiting for response") {
 }
 
 function renderThread() {
-  syncPredictedPendingEntry();
+  syncPendingSpeakerEntry();
   const thread = $("thread-view");
   const entries = threadEntriesForRender();
   const activeEntry = currentSpeakerEntry();
@@ -1184,7 +1367,7 @@ function isStageSpeaker(actor, entry) {
 }
 
 function renderArenaPresentation() {
-  syncPredictedPendingEntry();
+  syncPendingSpeakerEntry();
   const toggle = $("arena-presentation-toggle");
   if (toggle) {
     toggle.querySelectorAll("[data-presentation-mode]").forEach((button) => {
@@ -1671,7 +1854,7 @@ function renderSessions() {
                 <button data-label-save-id="${escapeHtml(session.id)}">Save Labels</button>
               </details>
               <div class="session-item-actions">
-                <button data-session-id="${escapeHtml(session.id)}">Open In Arena</button>
+                <button data-session-id="${escapeHtml(session.id)}">Open In Chamber</button>
                 <button data-reuse-id="${escapeHtml(session.id)}">Reuse Settings</button>
                 <button class="danger-action" data-delete-id="${escapeHtml(session.id)}">Delete</button>
               </div>
@@ -1778,6 +1961,31 @@ function upsertThreadEntry(entry) {
   }
 }
 
+function upsertLocalRound(event) {
+  if (!state.activeSession) return;
+  if (!Array.isArray(state.activeSession.rounds)) state.activeSession.rounds = [];
+  const existing = state.activeSession.rounds.find((round) => round.round_index === event.round_index);
+  if (existing) {
+    existing.round_type = event.round_type;
+    existing.completed_at = null;
+    return;
+  }
+  state.activeSession.rounds.push({
+    id: `local-${event.round_type}-${event.round_index}`,
+    session_id: state.activeSession.id,
+    round_index: event.round_index,
+    round_type: event.round_type,
+    started_at: new Date().toISOString(),
+    completed_at: null,
+  });
+}
+
+function completeLocalRound(event) {
+  if (!state.activeSession?.rounds?.length) return;
+  const round = state.activeSession.rounds.find((item) => item.round_index === event.round_index);
+  if (round) round.completed_at = new Date().toISOString();
+}
+
 function pushLocalSystemEntry(text) {
   upsertThreadEntry({
     id: `local-${Date.now()}`,
@@ -1813,10 +2021,11 @@ function queueThreadChunk(event) {
 }
 
 async function connectSocket(sessionId) {
-  if (state.socket) state.socket.close();
+  closeActiveSocket();
   return new Promise((resolve) => {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${protocol}://${window.location.host}/ws/sessions/${sessionId}`);
+    state.socket = socket;
     let settled = false;
     const settle = () => {
       if (settled) return;
@@ -1835,6 +2044,9 @@ async function connectSocket(sessionId) {
     };
     socket.onclose = () => {
       window.clearTimeout(readyTimer);
+      if (state.socket === socket) {
+        state.socket = null;
+      }
       settle();
     };
     socket.onmessage = async (raw) => {
@@ -1855,20 +2067,36 @@ async function connectSocket(sessionId) {
       }
 
       if (event.type === "thread_entry_saved") {
+        const pendingMatchesEntry =
+          state.pendingThreadEntry &&
+          state.pendingThreadEntry.kind === event.entry.kind &&
+          state.pendingThreadEntry.agent_id === event.entry.agent_id &&
+          state.pendingThreadEntry.round_index === event.entry.round_index;
         if (
           state.pendingThreadEntry?.id === event.entry.id ||
-          (
-            state.pendingThreadEntry?.payload?.predicted &&
-            state.pendingThreadEntry.kind === event.entry.kind &&
-            state.pendingThreadEntry.agent_id === event.entry.agent_id &&
-            state.pendingThreadEntry.round_index === event.entry.round_index
-          )
+          (state.pendingThreadEntry?.payload?.predicted && pendingMatchesEntry) ||
+          (state.pendingThreadEntry?.payload?.traceStarted && pendingMatchesEntry)
         ) {
           state.pendingThreadEntry = null;
         }
         upsertThreadEntry(event.entry);
         renderArenaPresentation();
         renderThread();
+        return;
+      }
+
+      if (event.type === "round_started") {
+        upsertLocalRound(event);
+        renderArenaPhaseRail();
+        renderLiveSpeakerStrip();
+        scheduleActiveSessionPoll();
+        return;
+      }
+
+      if (event.type === "round_completed") {
+        completeLocalRound(event);
+        syncPendingSpeakerEntry();
+        renderArena();
         return;
       }
 
@@ -1882,6 +2110,13 @@ async function connectSocket(sessionId) {
 
       if (event.type === "trace_event_saved") {
         state.traceEvents.push(event.trace_event);
+        if (event.trace_event.event_type === "turn_started" || event.trace_event.event_type === "turn_completed") {
+          syncPendingSpeakerEntry();
+          renderLiveSpeakerStrip();
+          renderParticipantStrip();
+          renderArenaPresentation();
+          renderThread();
+        }
         renderObservability();
         return;
       }
@@ -1898,8 +2133,8 @@ async function connectSocket(sessionId) {
           setArenaFeedback("Selecting personas before opening statements...", "success");
         } else if (event.status === "running") {
           setArenaFeedback("Debate started.", "success");
-        } else if (event.status === "failed" && event.error) {
-          setArenaFeedback(event.error, "error");
+        } else if (event.status === "failed") {
+          setArenaFeedback(event.error || sessionFailureMessage(state.activeSession) || "Debate failed.", "error");
         }
         if (
           event.status === "selecting_personas" ||
@@ -1911,6 +2146,7 @@ async function connectSocket(sessionId) {
           await loadSession(sessionId, { reconnect: false, clearFeedback: false, setArenaView: false });
         }
         renderArena();
+        scheduleActiveSessionPoll();
         if (
           event.status === "awaiting_continue" ||
           event.status === "awaiting_winner" ||
@@ -1921,17 +2157,27 @@ async function connectSocket(sessionId) {
         }
       }
     };
-    state.socket = socket;
   });
 }
 
 async function loadSession(sessionId, options = {}) {
-  const { reconnect = true, clearFeedback = true, setArenaView = true } = options;
+  const { reconnect = true, clearFeedback = true, setArenaView = true, schedulePoll = true } = options;
   const session = await fetchJson(`/api/sessions/${sessionId}`);
+  const recoveredFromSyncError =
+    state.activeSessionPollFailures > 0 &&
+    state.arenaFeedbackKind === "error" &&
+    state.arenaFeedback.startsWith("Could not sync the live run:");
   state.activeSessionId = sessionId;
   state.activeSession = session;
+  state.activeSessionPollFailures = 0;
   state.questionSuggestions = [];
-  if (clearFeedback) setArenaFeedback();
+  if (session.status === "failed") {
+    setArenaFeedback(sessionFailureMessage(session) || "Debate failed.", "error");
+  } else if (recoveredFromSyncError) {
+    setArenaFeedback();
+  } else if (clearFeedback) {
+    setArenaFeedback();
+  }
   applySessionToDraft(session);
   syncThreadEntriesFromSession(session);
   renderArena();
@@ -1939,7 +2185,10 @@ async function loadSession(sessionId, options = {}) {
     await connectSocket(sessionId);
   }
   if (setArenaView) {
-    setView("arena");
+    setView("setup");
+  }
+  if (schedulePoll) {
+    scheduleActiveSessionPoll();
   }
   return session;
 }
@@ -2009,7 +2258,7 @@ async function startDebate() {
     state.pendingThreadEntry = null;
     pushLocalSystemEntry("Opening the chamber. The council is taking the stage...");
   }
-  setView("arena");
+  setView("setup");
   renderArena();
   try {
     validateSeatConfig();
@@ -2061,11 +2310,11 @@ async function startDebate() {
     if (liveSession?.status === "selecting_personas") {
       setArenaFeedback("Selecting personas before opening statements...", "success");
     } else if (liveSession?.status === "failed") {
-      setArenaFeedback("Debate failed to start.", "error");
+      setArenaFeedback(sessionFailureMessage(liveSession) || "Debate failed to start.", "error");
     } else {
       setArenaFeedback("Debate started.", "success");
     }
-    setView("arena");
+    setView("setup");
     renderArena();
     await refreshSessions();
   } catch (error) {
@@ -2254,10 +2503,14 @@ async function refreshSessions() {
 
 async function reuseSession(sessionId) {
   const session = await fetchJson(`/api/sessions/${sessionId}`);
+  closeActiveSocket();
+  clearActiveSessionPoll();
   state.activeSessionId = null;
   state.activeSession = null;
   state.threadEntries = [];
   state.traceEvents = [];
+  state.pendingThreadEntry = null;
+  state.questionSuggestions = [];
   applySessionToDraft(session);
   $("main-composer").value = session.topic;
   persistDraft();
@@ -2269,11 +2522,7 @@ async function deleteSession(sessionId) {
   if (!confirm("Delete this chamber permanently?")) return;
   await fetchJson(`/api/sessions/${sessionId}`, { method: "DELETE" });
   if (state.activeSessionId === sessionId) {
-    state.activeSessionId = null;
-    state.activeSession = null;
-    state.threadEntries = [];
-    state.traceEvents = [];
-    renderArena();
+    clearCurrentRun({ feedbackMessage: "Run deleted. Setup is ready for another debate." });
   }
   await refreshSessions();
 }
@@ -2435,6 +2684,13 @@ function registerArenaListeners() {
   $("export-trace").addEventListener("click", () => {
     if (!state.activeSessionId) return;
     window.open(`/api/sessions/${state.activeSessionId}/trace/export`, "_blank");
+  });
+  $("refresh-run").addEventListener("click", () => {
+    if (!state.activeSessionId) return;
+    if (liveSessionNeedsPolling() && !confirm("Clear this live run from the chamber? The saved run remains in Sessions.")) {
+      return;
+    }
+    clearCurrentRun();
   });
 
   $("arena-moderator-submit").addEventListener("click", () => sendModeratorNote().catch(alert));

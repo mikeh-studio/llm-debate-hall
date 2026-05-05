@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import queue as queue_module
 import re
 from pathlib import Path
 
@@ -640,13 +642,29 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
     @app.websocket("/ws/sessions/{session_id}")
     async def session_ws(websocket: WebSocket, session_id: str) -> None:
         await websocket.accept()
-        queue = await broker.subscribe(session_id)
+        event_queue = await broker.subscribe(session_id)
+        disconnect_task = asyncio.create_task(websocket.receive())
         try:
             while True:
-                event = await asyncio.to_thread(queue.get)
+                if disconnect_task.done():
+                    message = disconnect_task.result()
+                    if message.get("type") == "websocket.disconnect":
+                        break
+                    disconnect_task = asyncio.create_task(websocket.receive())
+                try:
+                    event = event_queue.get_nowait()
+                except queue_module.Empty:
+                    await asyncio.sleep(0.1)
+                    continue
                 await websocket.send_json(event)
-        except WebSocketDisconnect:
-            await broker.unsubscribe(session_id, queue)
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            pass
+        finally:
+            if not disconnect_task.done():
+                disconnect_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await disconnect_task
+            await broker.unsubscribe(session_id, event_queue)
 
     return app
 

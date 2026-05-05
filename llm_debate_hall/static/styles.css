@@ -274,6 +274,30 @@ button:disabled {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
+.chamber-setup-rail .participant-strip {
+  grid-template-columns: 1fr;
+}
+
+.chamber-setup-rail .participant-strip-bar {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+.chamber-setup-rail #add-seat {
+  width: 100%;
+}
+
+.chamber-setup-rail .participant-chip {
+  width: 100%;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.chamber-setup-rail .participant-chip span {
+  text-align: right;
+  line-height: 1.45;
+}
+
 .thread-feedback {
   display: none;
   padding: 12px 14px;
@@ -745,18 +769,30 @@ textarea {
   padding-left: 20px;
 }
 
-/* ─── Setup View ─── */
-.setup-layout {
-  display: block;
+.chamber-workbench {
+  display: grid;
+  grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+  overflow: hidden;
+  min-height: calc(100vh - 170px);
 }
 
-.setup-composer {
-  padding: 24px;
+.chamber-setup-rail {
+  min-width: 0;
+  border-right: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--surface-deep) 16%, var(--surface));
 }
 
 .setup-composer {
   display: grid;
   gap: 16px;
+  padding: 22px;
+}
+
+.chamber-workbench .debate-mockup {
+  min-width: 0;
+  box-shadow: none;
+  border-radius: 0;
+  background: var(--surface);
 }
 
 .participant-strip-bar {
@@ -1377,6 +1413,15 @@ textarea {
 }
 
 @media (max-width: 1080px) {
+  .chamber-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .chamber-setup-rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
   .secondary-layout {
     grid-template-columns: 1fr;
   }

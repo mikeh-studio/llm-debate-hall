@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Callable
 
 from llm_debate_hall.adapters.base import AdapterRequest, DebateAdapter
@@ -8,6 +9,8 @@ from llm_debate_hall.events import EventBroker
 from llm_debate_hall.payloads import required_json
 from llm_debate_hall.prompts import build_persona_prompt
 from llm_debate_hall.storage import Storage
+
+PERSONA_SELECTION_TIMEOUT_SECONDS = float(os.environ.get("LLM_DEBATE_HALL_PERSONA_SELECTION_TIMEOUT_SECONDS", "240"))
 
 
 class PersonaSelectionService:
@@ -17,10 +20,12 @@ class PersonaSelectionService:
         storage: Storage,
         broker: EventBroker,
         adapter_factory: Callable[[dict[str, Any]], DebateAdapter],
+        timeout_seconds: float = PERSONA_SELECTION_TIMEOUT_SECONDS,
     ) -> None:
         self.storage = storage
         self.broker = broker
         self.adapter_factory = adapter_factory
+        self.timeout_seconds = timeout_seconds
 
     async def select_personas(
         self,
@@ -32,12 +37,20 @@ class PersonaSelectionService:
         if not auto_agents:
             return
 
-        results = await asyncio.gather(
-            *[
-                self._select_persona_for_agent(session, agent, selectable_personas)
-                for agent in auto_agents
-            ]
-        )
+        selection_tasks = [
+            self._select_persona_for_agent(session, agent, selectable_personas)
+            for agent in auto_agents
+        ]
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*selection_tasks),
+                timeout=self.timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            names = ", ".join(agent["display_name"] for agent in auto_agents)
+            raise TimeoutError(
+                f"Persona selection timed out after {self.timeout_seconds:g} seconds while choosing personas for {names}."
+            ) from exc
 
         for agent, persona_id, justification in results:
             self.storage.update_agent_persona(agent["id"], persona_id)

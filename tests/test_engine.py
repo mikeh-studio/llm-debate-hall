@@ -150,6 +150,16 @@ class ConcurrentPersonaAdapter:
         return AdapterResponse(raw_text=raw_text, stream_status="simulated")
 
 
+class HangingPersonaAdapter:
+    def supports_persistent_sessions(self, request) -> bool:
+        return False
+
+    async def generate(self, request, on_chunk) -> AdapterResponse:
+        if request.output_mode == "persona":
+            await asyncio.Event().wait()
+        raise AssertionError("The debate should fail before turn generation starts.")
+
+
 class PersistentFallbackAdapter:
     def supports_persistent_sessions(self, request) -> bool:
         return request.role == "debater"
@@ -529,6 +539,65 @@ def test_engine_selects_personas_concurrently(tmp_path: Path) -> None:
     asyncio.run(engine.run_segment(session["id"]))
 
     assert adapter.max_concurrent_persona_calls >= 2
+
+
+def test_engine_fails_when_persona_selection_times_out(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
+    broker = EventBroker()
+    engine = DebateEngine(storage=storage, broker=broker, adapter_factory=lambda agent: HangingPersonaAdapter())
+    engine.persona_selection_service.timeout_seconds = 0.01
+
+    session = storage.create_session(
+        "Should stalled persona selection fail visibly?",
+        [
+            {
+                "display_name": "Athena",
+                "role": "debater",
+                "side": "independent",
+                "preset_id": "mock",
+                "model_name": "mock-model",
+                "command": ["mock"],
+                "args_template": [],
+                "env": {},
+            },
+            {
+                "display_name": "Burke",
+                "role": "debater",
+                "side": "independent",
+                "preset_id": "mock",
+                "model_name": "mock-model",
+                "command": ["mock"],
+                "args_template": [],
+                "env": {},
+            },
+        ],
+        {
+            "display_name": "Solon",
+            "role": "judge",
+            "side": "judge",
+            "preset_id": "mock",
+            "model_name": "mock-judge",
+            "command": ["mock"],
+            "args_template": [],
+            "env": {},
+        },
+    )
+
+    try:
+        asyncio.run(engine.run_segment(session["id"]))
+    except TimeoutError as exc:
+        assert "Persona selection timed out" in str(exc)
+    else:
+        raise AssertionError("Expected persona selection timeout to fail the session.")
+
+    result = storage.get_session(session["id"])
+    assert result["status"] == "failed"
+    assert result["messages"] == []
+    assert any(
+        "Persona selection timed out" in entry["display_text"]
+        for entry in result["thread_entries"]
+        if entry["kind"] == "system"
+    )
 
 
 def test_engine_summary_includes_moderator_thread_entries(tmp_path: Path) -> None:
