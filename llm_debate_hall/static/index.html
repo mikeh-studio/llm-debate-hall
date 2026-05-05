@@ -18,8 +18,7 @@
           <h1>Council Thread</h1>
         </div>
         <nav class="topnav">
-          <button class="nav-tab active" data-view="setup">Setup</button>
-          <button class="nav-tab" data-view="arena">Arena</button>
+          <button class="nav-tab active" data-view="setup">Chamber</button>
           <button class="nav-tab" data-view="personas">Personas</button>
           <button class="nav-tab" data-view="sessions">Sessions</button>
         </nav>
@@ -27,11 +26,12 @@
       </header>
 
       <section class="view is-active" id="view-setup">
-        <div class="setup-layout">
-          <section class="chrome-card setup-composer">
+        <div class="chamber-workbench chrome-card">
+          <aside class="chamber-setup-rail" aria-label="Debate setup">
+          <section class="setup-composer">
             <div class="panel-head">
               <div>
-                <p class="panel-kicker">Topic</p>
+                <p class="panel-kicker">Setup</p>
                 <h2>Debate Question</h2>
               </div>
             </div>
@@ -122,24 +122,23 @@
               </div>
             </div>
           </section>
-        </div>
-      </section>
+          </aside>
 
-      <section class="view" id="view-arena">
-        <div class="debate-mockup chrome-card">
+          <section class="debate-mockup">
           <div class="debate-header">
             <div class="debate-header-left">
-              <span class="debate-header-eyebrow">Arena</span>
+              <span class="debate-header-eyebrow">Chamber</span>
               <span class="debate-header-title" id="arena-topic">Start a structured debate</span>
             </div>
             <div class="head-actions">
               <span class="debate-status" id="arena-status">Setup</span>
+              <button id="refresh-run" type="button" title="Clear this run from the chamber">Refresh</button>
               <button id="export-session">Export</button>
               <button id="export-trace">Trace JSON</button>
             </div>
           </div>
           <p class="arena-subtitle" id="arena-subtitle">
-            Configure debaters in Setup, then start the debate.
+            Configure the council on the left, then start the debate.
           </p>
           <section class="arena-experience" aria-label="Debate progress">
             <div class="arena-phase-rail" id="arena-phase-rail"></div>
@@ -190,6 +189,7 @@
               </div>
             </div>
           </div>
+          </section>
         </div>
       </section>
 
