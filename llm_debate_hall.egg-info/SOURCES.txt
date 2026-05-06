@@ -19,7 +19,6 @@ llm_debate_hall/adapters/subprocess_adapter.py
 llm_debate_hall/personas/__init__.py
 llm_debate_hall/static/app.js
 llm_debate_hall/static/index.html
-llm_debate_hall/static/llm-debate-hall-header_2.png
 llm_debate_hall/static/styles.css
 tests/test_api.py
 tests/test_engine.py

@@ -24,8 +24,10 @@ const DEFAULT_PERSONA_IDS = [
   "utilitarian_analyst",
   "nietzschean_iconoclast",
 ];
-const DRAFT_STORAGE_KEY = "llm-debate-hall:draft:v1";
-const ARENA_PRESENTATION_STORAGE_KEY = "llm-debate-hall:arena-presentation:v1";
+const LEGACY_DRAFT_STORAGE_KEY = "llm-debate-hall:draft:v1";
+const LEGACY_ARENA_PRESENTATION_STORAGE_KEY = "llm-debate-hall:arena-presentation:v1";
+const DRAFT_STORAGE_KEY = "multi-agent-council:draft:v1";
+const ARENA_PRESENTATION_STORAGE_KEY = "multi-agent-council:arena-presentation:v1";
 const SESSION_SYNC_TIMEOUT_MS = 8000;
 const SESSION_SYNC_INTERVAL_MS = 250;
 const ACTIVE_SESSION_POLL_INTERVAL_MS = 3000;
@@ -227,7 +229,9 @@ function defaultPersonaChoiceForSeat(index = 0) {
 
 function readArenaPresentationMode() {
   try {
-    const saved = window.localStorage.getItem(ARENA_PRESENTATION_STORAGE_KEY);
+    const saved =
+      window.localStorage.getItem(ARENA_PRESENTATION_STORAGE_KEY) ||
+      window.localStorage.getItem(LEGACY_ARENA_PRESENTATION_STORAGE_KEY);
     return saved === "pixel-stage" ? "pixel-stage" : "classic";
   } catch {
     return "classic";
@@ -240,7 +244,7 @@ function persistArenaPresentationMode() {
 
 function readDraft() {
   try {
-    const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY);
+    const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY) || window.localStorage.getItem(LEGACY_DRAFT_STORAGE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -885,7 +889,7 @@ function renderLiveSpeakerStrip() {
       <div class="live-speaker-card is-live">
         <span class="live-speaker-kicker">Personas</span>
         <strong>Selecting personas</strong>
-        <span>Debate Hall</span>
+        <span>Council</span>
         <div class="live-speaker-preview">${thinkingDotsMarkup(`Selecting personas for ${names}`)}</div>
       </div>
     `;
@@ -896,7 +900,7 @@ function renderLiveSpeakerStrip() {
   const phase = ARENA_PHASES.find((item) => item.id === currentArenaPhase())?.label || "Arena";
   const isThinking = Boolean(entry?.pending && !String(entry.display_text || "").trim());
   const waitingForLiveSpeaker = Boolean(state.activeSession?.status === "running" && !entry);
-  const speakerName = entry?.display_name || "Debate Hall";
+  const speakerName = entry?.display_name || "Council";
   const speakerRole = entry ? threadEntryRoleLabel(entry) : phase;
   const preview = entry?.display_text
     ? truncateStageBubble(entry.display_text, 110)
@@ -1002,7 +1006,7 @@ function deriveThreadEntriesFromSession(session) {
     entries.push({
       id: `round-${round.id}`,
       kind: "system",
-      display_name: "Debate Hall",
+      display_name: "Council",
       display_text: `Round ${round.round_index} started: ${round.round_type}.`,
       round_type: round.round_type,
       round_index: round.round_index,
@@ -1990,7 +1994,7 @@ function pushLocalSystemEntry(text) {
   upsertThreadEntry({
     id: `local-${Date.now()}`,
     kind: "system",
-    display_name: "Debate Hall",
+    display_name: "Council",
     display_text: text,
     round_type: null,
     round_index: null,

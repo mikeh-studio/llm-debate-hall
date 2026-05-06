@@ -3,7 +3,7 @@
 ## Quick Start
 
 ```bash
-cd llm-debate-hall
+cd multi-agent-council
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
@@ -17,7 +17,7 @@ Open `http://127.0.0.1:8000`.
 ```bash
 pytest -q
 node --check llm_debate_hall/static/app.js
-PYTHONPYCACHEPREFIX=/tmp/llm-debate-hall-pyc python3 -m compileall llm_debate_hall tests
+PYTHONPYCACHEPREFIX=/tmp/multi-agent-council-pyc python3 -m compileall llm_debate_hall tests
 ```
 
 ## Design System

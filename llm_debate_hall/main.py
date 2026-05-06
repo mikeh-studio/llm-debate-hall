@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
 import queue as queue_module
 import re
 from pathlib import Path
@@ -14,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from llm_debate_hall.adapters.base import AdapterRequest, PRESET_REGISTRY
+from llm_debate_hall.config import APP_NAME, APP_SLUG, default_db_path, env_value
 from llm_debate_hall.engine import DebateEngine
 from llm_debate_hall.model_catalog import assert_active_model, model_lookup_payload, visible_presets
 from llm_debate_hall.events import EventBroker
@@ -77,8 +77,8 @@ def _persona_generation_prompt(description: str, name_hint: str | None, family_h
 def create_app(db_path: str | None = None, personas_root: str | None = None) -> FastAPI:
     base_dir = Path(__file__).resolve().parent
     static_dir = base_dir / "static"
-    resolved_db_path = db_path or os.environ.get("LLM_DEBATE_HALL_DB_PATH") or str(base_dir.parent / "llm_debate_hall.db")
-    resolved_personas_root = personas_root or os.environ.get("LLM_DEBATE_HALL_PERSONAS_ROOT") or str(base_dir / "personas")
+    resolved_db_path = db_path or env_value("DB_PATH") or default_db_path(base_dir.parent)
+    resolved_personas_root = personas_root or env_value("PERSONAS_ROOT") or str(base_dir / "personas")
     storage = Storage(
         resolved_db_path,
         personas_root_path=resolved_personas_root,
@@ -86,7 +86,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
     broker = EventBroker()
     engine = DebateEngine(storage=storage, broker=broker)
 
-    app = FastAPI(title="LLM Debate Hall")
+    app = FastAPI(title=APP_NAME)
     app.state.storage = storage
     app.state.engine = engine
     app.state.broker = broker
@@ -128,11 +128,11 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
 
     @app.get("/healthz")
     async def healthz() -> dict:
-        return {"status": "ok", "app": "llm-debate-hall"}
+        return {"status": "ok", "app": APP_SLUG}
 
     @app.get("/api/health")
     async def api_health() -> dict:
-        return {"status": "ok", "app": "llm-debate-hall"}
+        return {"status": "ok", "app": APP_SLUG}
 
     @app.get("/api/presets")
     async def list_presets() -> list[dict]:
@@ -493,7 +493,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
         entry = storage.add_thread_entry(
             session_id=session_id,
             kind="system",
-            display_name="Debate Hall",
+            display_name="Council",
             display_text=detail,
             agent_id=agent_id,
             payload={"event": "provider_session_reset", "agent_id": agent_id},

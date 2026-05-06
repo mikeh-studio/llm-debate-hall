@@ -125,7 +125,7 @@ class DebateEngine:
                 entry = self.storage.add_thread_entry(
                     session_id=session_id,
                     kind="system",
-                    display_name="Debate Hall",
+                    display_name="Council",
                     display_text=self._persona_selection_text(auto_agents),
                     payload={"event": "persona_selection_started"},
                 )
@@ -164,7 +164,7 @@ class DebateEngine:
             entry = self.storage.add_thread_entry(
                 session_id=session_id,
                 kind="system",
-                display_name="Debate Hall",
+                display_name="Council",
                 display_text=str(exc),
                 payload={"event": "session_failed"},
             )
@@ -196,7 +196,7 @@ class DebateEngine:
         thread_entry = self.storage.add_thread_entry(
             session_id=session_id,
             kind="system",
-            display_name="Debate Hall",
+            display_name="Council",
             display_text=f"Round {round_index} started: {round_type}.",
             round_type=round_type,
             round_index=round_index,

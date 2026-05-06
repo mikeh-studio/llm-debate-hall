@@ -10,6 +10,7 @@ from typing import Any
 
 from llm_debate_hall.adapters.base import PRESET_REGISTRY
 from llm_debate_hall.adapters.subprocess_adapter import AUTH_ERROR_MARKERS, MODEL_ERROR_MARKERS
+from llm_debate_hall.config import APP_NAME, APP_SLUG
 from llm_debate_hall.engine import active_models_for_preset, visible_presets
 from llm_debate_hall.main import create_app
 
@@ -457,7 +458,7 @@ def run_live_debate_smoke(
         )
         return SmokeRunOutcome(ok=False, report_path=report_path, attempts=attempts, topic=topic, blocker=blocker)
 
-    with TemporaryDirectory(prefix="llm-debate-hall-live-smoke-") as temp_dir:
+    with TemporaryDirectory(prefix=f"{APP_SLUG}-live-smoke-") as temp_dir:
         app = create_app(
             db_path=str(Path(temp_dir) / "debate.db"),
             personas_root=str(Path(temp_dir) / "personas"),
@@ -504,7 +505,7 @@ def run_live_debate_smoke(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the LLM Debate Hall live 3-debater smoke test.")
+    parser = argparse.ArgumentParser(description=f"Run the {APP_NAME} live 3-debater smoke test.")
     parser.add_argument("--topic", default=DEFAULT_TOPIC, help="Debate topic to use.")
     parser.add_argument(
         "--report-dir",

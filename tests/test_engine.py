@@ -302,7 +302,7 @@ def test_engine_uses_more_reply_rounds_for_conversational_mode(tmp_path: Path) -
 
 
 def test_visible_presets_can_expose_mock_backend_for_hosted_demo(monkeypatch) -> None:
-    monkeypatch.setenv("LLM_DEBATE_HALL_ENABLE_MOCK_PRESET", "true")
+    monkeypatch.setenv("MULTI_AGENT_COUNCIL_ENABLE_MOCK_PRESET", "true")
     monkeypatch.setattr(model_catalog.shutil, "which", lambda _: None)
     monkeypatch.setattr(
         model_catalog,
@@ -721,7 +721,7 @@ def test_engine_records_turn_trace_metrics(tmp_path: Path) -> None:
     engine = DebateEngine(storage=storage, broker=broker)
 
     session = storage.create_session(
-        "Should Debate Hall expose turn metrics?",
+        "Should Multi-Agent Council expose turn metrics?",
         [
             {
                 "display_name": "Athena",

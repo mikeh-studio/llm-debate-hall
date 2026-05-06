@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any, Callable
 
 from llm_debate_hall.adapters.base import AdapterRequest, DebateAdapter
+from llm_debate_hall.config import env_value
 from llm_debate_hall.events import EventBroker
 from llm_debate_hall.payloads import required_json
 from llm_debate_hall.prompts import build_persona_prompt
 from llm_debate_hall.storage import Storage
 
-PERSONA_SELECTION_TIMEOUT_SECONDS = float(os.environ.get("LLM_DEBATE_HALL_PERSONA_SELECTION_TIMEOUT_SECONDS", "240"))
+PERSONA_SELECTION_TIMEOUT_SECONDS = float(env_value("PERSONA_SELECTION_TIMEOUT_SECONDS", "240"))
 
 
 class PersonaSelectionService:
