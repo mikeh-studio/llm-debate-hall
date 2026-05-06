@@ -1,13 +1,13 @@
 [project]
-name = "llm-debate-hall"
+name = "multi-agent-council"
 version = "0.1.0"
-description = "For-fun local-first multi-agent debate hall with pluggable CLI backends."
+description = "For-fun local-first multi-agent council with pluggable CLI backends."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
   { name = "Mike H" },
 ]
-keywords = ["agents", "debate", "cli", "fastapi", "local-first", "llm"]
+keywords = ["agents", "council", "cli", "fastapi", "local-first", "multi-agent"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Framework :: FastAPI",

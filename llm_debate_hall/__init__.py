@@ -1,1 +1,1 @@
-"""Debate Hall application package."""
+"""Multi-Agent Council application package."""

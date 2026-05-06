@@ -1,8 +1,8 @@
-# Design System — LLM Debate Hall
+# Design System — Multi-Agent Council
 
 ## Product Context
-- **What this is:** A local-first web app where multiple AI agents debate as philosopher personas in an arena-style setup
-- **Who it's for:** Developers experimenting with multi-agent LLM setups
+- **What this is:** A local-first web app where multiple AI agents deliberate as philosopher personas in a chamber-style setup
+- **Who it's for:** Developers experimenting with multi-agent systems
 - **Space/industry:** AI tooling, multi-agent systems, developer playgrounds
 - **Project type:** Web app (FastAPI + vanilla HTML/CSS/JS)
 

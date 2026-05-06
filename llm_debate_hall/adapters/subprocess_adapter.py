@@ -23,6 +23,7 @@ from llm_debate_hall.adapters.base import (
     DebateAdapter,
     PersistentAdapterResponse,
 )
+from llm_debate_hall.config import APP_SLUG, env_value
 from llm_debate_hall.models import BackendPresetModel
 
 
@@ -54,9 +55,9 @@ AUTH_ERROR_MARKERS = (
 PROBE_PROMPT = "Reply with the single word OK."
 PROBE_TIMEOUT_SECONDS = 20
 PROBE_CACHE_TTL_SECONDS = 300
-GENERATION_TIMEOUT_SECONDS = int(os.environ.get("LLM_DEBATE_HALL_GENERATION_TIMEOUT_SECONDS", "180"))
+GENERATION_TIMEOUT_SECONDS = int(env_value("GENERATION_TIMEOUT_SECONDS", "180"))
 ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS = int(
-    os.environ.get("LLM_DEBATE_HALL_ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS", "300")
+    env_value("ANTHROPIC_PERSISTENT_TIMEOUT_SECONDS", "300")
 )
 ANTHROPIC_SESSION_IN_USE_RETRY_DELAYS_SECONDS = (0.5, 1.0)
 _PROBE_CACHE: dict[str, tuple[float, list[str]]] = {}
@@ -279,7 +280,7 @@ def _probe_request(preset: BackendPresetModel, model_name: str, env: dict[str, s
 
 def _probe_codex_model(preset: BackendPresetModel, model_name: str, env: dict[str, str] | None = None) -> bool:
     request = _probe_request(preset, model_name, env)
-    temp_handle = tempfile.NamedTemporaryFile(prefix="llm-debate-hall-probe-", suffix=".txt", delete=False)
+    temp_handle = tempfile.NamedTemporaryFile(prefix=f"{APP_SLUG}-probe-", suffix=".txt", delete=False)
     temp_handle.close()
     output_path = Path(temp_handle.name)
     try:
@@ -538,7 +539,7 @@ class SubprocessDebateAdapter(DebateAdapter):
         return PersistentAdapterResponse(response=response, provider_session_id=provider_session_id)
 
     async def _generate_codex_exec(self, request: AdapterRequest, on_chunk: ChunkCallback) -> AdapterResponse:
-        temp_handle = tempfile.NamedTemporaryFile(prefix="llm-debate-hall-codex-", suffix=".txt", delete=False)
+        temp_handle = tempfile.NamedTemporaryFile(prefix=f"{APP_SLUG}-codex-", suffix=".txt", delete=False)
         temp_handle.close()
         output_path = Path(temp_handle.name)
         command = build_codex_exec_command(request, str(output_path))
@@ -577,7 +578,7 @@ class SubprocessDebateAdapter(DebateAdapter):
         provider_session_id: str | None,
         on_chunk: ChunkCallback,
     ) -> PersistentAdapterResponse:
-        temp_handle = tempfile.NamedTemporaryFile(prefix="llm-debate-hall-codex-", suffix=".txt", delete=False)
+        temp_handle = tempfile.NamedTemporaryFile(prefix=f"{APP_SLUG}-codex-", suffix=".txt", delete=False)
         temp_handle.close()
         output_path = Path(temp_handle.name)
         command = (

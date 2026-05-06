@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from llm_debate_hall.adapters.base import PRESET_REGISTRY
 from llm_debate_hall.adapters.subprocess_adapter import cached_active_models, catalog_models, probe_active_models
+from llm_debate_hall.config import env_flag
 
 
 AUTH_CHECK_TIMEOUT_SECONDS = 8
@@ -214,9 +215,5 @@ def _anthropic_probe_succeeds(command: list[str], env: dict[str, str] | None) ->
     return completed.returncode == 0 and bool((completed.stdout or completed.stderr).strip())
 
 
-def _env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _mock_preset_enabled() -> bool:
-    return _env_flag("LLM_DEBATE_HALL_ENABLE_MOCK_PRESET")
+    return env_flag("ENABLE_MOCK_PRESET")

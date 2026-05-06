@@ -1,8 +1,6 @@
-# LLM Debate Hall
+# Multi-Agent Council
 
-![LLM Debate Hall header](llm_debate_hall/static/llm-debate-hall-header_2.png)
-
-LLM Debate Hall is a local-first FastAPI app for running structured multi-agent debates with real model CLIs, persistent transcripts, and persona-driven debaters. Give several agents a question, cast each one as a distinct philosophy or style, and watch the debate unfold as one continuous Chamber thread instead of a pile of disconnected model outputs.
+Multi-Agent Council is a local-first FastAPI app for running structured multi-agent deliberations with real model CLIs, persistent transcripts, and persona-driven agents. Give several agents a question, cast each one as a distinct philosophy or style, and watch the council unfold as one continuous Chamber thread instead of a pile of disconnected model outputs.
 
 It is built for a very specific kind of experiment: using the local tools you already trust, keeping the debate state on your machine, and making the whole exchange inspectable enough to replay, judge, and test. The result sits somewhere between an AI toy, a debate simulator, and a local developer tool for probing how different model backends reason under pressure.
 
@@ -62,7 +60,7 @@ Personas remain editable in the app, and the Chamber supports a dark theme for l
 ## Quick Start
 
 ```bash
-cd llm-debate-hall
+cd multi-agent-council
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
@@ -78,7 +76,7 @@ The lightweight local validation set is:
 ```bash
 pytest -q
 node --check llm_debate_hall/static/app.js
-PYTHONPYCACHEPREFIX=/tmp/llm-debate-hall-pyc python3 -m compileall llm_debate_hall tests
+PYTHONPYCACHEPREFIX=/tmp/multi-agent-council-pyc python3 -m compileall llm_debate_hall tests
 ```
 
 For UI or orchestration changes, also test the live app in the browser at `http://127.0.0.1:8000`.
@@ -88,7 +86,7 @@ For persona workflow changes, verify persona generation, icon rendering, and sav
 
 ## Local Session Data
 
-Runtime sessions are stored in local SQLite files such as `llm_debate_hall.db`. Those files, SQLite sidecars, and local `sessions/` directories are ignored by `.gitignore`; do not commit saved debate runs or exported local evidence unless a test fixture explicitly requires it.
+Runtime sessions are stored in local SQLite files such as `multi_agent_council.db`. Those files, SQLite sidecars, and local `sessions/` directories are ignored by `.gitignore`; do not commit saved council runs or exported local evidence unless a test fixture explicitly requires it. Existing `llm_debate_hall.db` files are still detected for local backwards compatibility.
 
 ## Live Debate Smoke Test
 
@@ -102,7 +100,7 @@ python3 scripts/run_live_debate_smoke.py
 
 The smoke workflow shipped alongside two runtime fixes that matter for real-provider debates:
 
-- longer generation timeouts for slow live turns, configurable with `LLM_DEBATE_HALL_GENERATION_TIMEOUT_SECONDS`
+- longer generation timeouts for slow live turns, configurable with `MULTI_AGENT_COUNCIL_GENERATION_TIMEOUT_SECONDS`
 - process-group cleanup on timeout so orphaned provider subprocesses do not linger after a failed turn
 
 The runner requires at least one validated real provider from the built-in `openai` or `anthropic` presets. It will not fall back to `mock`, and its generated reports/screenshots are intended as local evidence rather than committed source.

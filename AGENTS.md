@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`llm_debate_hall/` contains the FastAPI server and debate runtime. `main.py` serves APIs and static assets, `engine.py` runs the staged debate flow, `storage.py` owns SQLite persistence, and `adapters/` contains provider integrations. Persistent debater thread state is stored separately from transcript history, so keep adapter, engine, and storage changes aligned. Frontend assets live in `llm_debate_hall/static/` as plain `index.html`, `app.js`, and `styles.css`. Tests are in `tests/`. `llm_debate_hall.db` is runtime data, not source.
+`llm_debate_hall/` contains the FastAPI server and council runtime. `main.py` serves APIs and static assets, `engine.py` runs the staged deliberation flow, `storage.py` owns SQLite persistence, and `adapters/` contains provider integrations. Persistent agent thread state is stored separately from transcript history, so keep adapter, engine, and storage changes aligned. Frontend assets live in `llm_debate_hall/static/` as plain `index.html`, `app.js`, and `styles.css`. Tests are in `tests/`. `multi_agent_council.db` and legacy `llm_debate_hall.db` files are runtime data, not source.
 
 ## Build, Test, and Development Commands
 Run locally from the repo root:
@@ -14,7 +14,7 @@ uvicorn llm_debate_hall.main:app --reload
 ```
 
 Use `pytest -q` to run the full test suite. Use `python -m compileall llm_debate_hall tests` for a quick syntax sweep. For frontend-only edits, use `node --check llm_debate_hall/static/app.js` to catch JavaScript syntax errors.
-When `compileall` is blocked by macOS cache permissions, run `PYTHONPYCACHEPREFIX=/tmp/llm-debate-hall-pyc python3 -m compileall llm_debate_hall tests` instead.
+When `compileall` is blocked by macOS cache permissions, run `PYTHONPYCACHEPREFIX=/tmp/multi-agent-council-pyc python3 -m compileall llm_debate_hall tests` instead.
 
 ## Coding Style & Naming Conventions
 Use Python 3.11+ and 4-space indentation. Keep backend code straightforward and typed where practical; existing models use Pydantic and small helper functions over deep class hierarchies. Use `snake_case` for Python names and JSON keys. In frontend code, follow the current vanilla JS style: small rendering helpers, single `state` object, and `camelCase` function names. Keep HTML/CSS changes aligned with the current arena layout rather than introducing frameworks.

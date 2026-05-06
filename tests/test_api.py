@@ -241,7 +241,7 @@ def test_health_endpoints_return_ok(tmp_path: Path) -> None:
     for path in ("/healthz", "/api/health"):
         response = client.get(path)
         assert response.status_code == 200
-        assert response.json() == {"status": "ok", "app": "llm-debate-hall"}
+        assert response.json() == {"status": "ok", "app": "multi-agent-council"}
 
 
 def test_persona_endpoints_include_pixel_icons(tmp_path: Path) -> None:

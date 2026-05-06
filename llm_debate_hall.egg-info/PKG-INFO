@@ -1,9 +1,9 @@
 Metadata-Version: 2.4
-Name: llm-debate-hall
+Name: multi-agent-council
 Version: 0.1.0
-Summary: For-fun local-first multi-agent debate hall with pluggable CLI backends.
+Summary: For-fun local-first multi-agent council with pluggable CLI backends.
 Author: Mike H
-Keywords: agents,debate,cli,fastapi,local-first,llm
+Keywords: agents,council,cli,fastapi,local-first,multi-agent
 Classifier: Development Status :: 3 - Alpha
 Classifier: Framework :: FastAPI
 Classifier: Intended Audience :: Developers
@@ -21,11 +21,9 @@ Requires-Dist: httpx>=0.27.0; extra == "dev"
 Requires-Dist: pytest>=8.0.0; extra == "dev"
 Dynamic: license-file
 
-# LLM Debate Hall
+# Multi-Agent Council
 
-![LLM Debate Hall header](llm_debate_hall/static/llm-debate-hall-header_2.png)
-
-LLM Debate Hall is a for-fun, work-in-progress project for running a circle of local AI debaters. One inspiration for this project was the multi-agent council concept seen in Karpathy's `llm-council`, though this repo takes it in a different, more debate- and game-oriented direction. The current experiment is simple: give multiple agent CLIs a topic, let each one act as a chosen philosopher or persona, and see how the debate unfolds. The broader idea is larger than debate alone; the circle could expand into other multi-agent interactions over time.
+Multi-Agent Council is a local-first FastAPI app for running structured multi-agent deliberations with real model CLIs, persistent transcripts, and persona-driven agents.
 
 ## Status
 
@@ -48,7 +46,7 @@ The judge is stateless and evaluates from the stored transcript. Supported provi
 ## Quick Start
 
 ```bash
-cd llm-debate-hall
+cd multi-agent-council
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
@@ -62,7 +60,7 @@ Open `http://127.0.0.1:8000`.
 ```bash
 pytest -q
 node --check llm_debate_hall/static/app.js
-PYTHONPYCACHEPREFIX=/tmp/llm-debate-hall-pyc python3 -m compileall llm_debate_hall tests
+PYTHONPYCACHEPREFIX=/tmp/multi-agent-council-pyc python3 -m compileall llm_debate_hall tests
 ```
 
 For UI or orchestration changes, also test the live app in the browser at `http://127.0.0.1:8000`.
@@ -70,7 +68,7 @@ For UI or orchestration changes, also test the live app in the browser at `http:
 ## Project Layout
 
 - `llm_debate_hall/` FastAPI app, debate engine, storage, adapters
-- `llm_debate_hall/static/` arena UI
+- `llm_debate_hall/static/` Chamber UI
 - `tests/` API, engine, storage, and adapter tests
 
 ## Local-Only Constraints

@@ -2,6 +2,8 @@
 __pycache__/
 .pytest_cache/
 *.pyc
+multi_agent_council.db
+multi_agent_council.db-*
 llm_debate_hall.db
 llm_debate_hall.db-*
 *.sqlite
