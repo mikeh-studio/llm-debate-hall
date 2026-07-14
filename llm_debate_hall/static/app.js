@@ -452,6 +452,7 @@ function baseModelLookup(presetId) {
     manual_model_entry: Boolean(preset?.requires_command_override),
     provider_auth_error: preset?.provider_auth_error || "",
     provider_ready: preset?.provider_ready,
+    custom_commands_enabled: Boolean(preset?.custom_commands_enabled),
   };
 }
 
@@ -460,6 +461,9 @@ function modelLookupForConfig(presetId, config = {}) {
 }
 
 function modelConfigFromSeat(seat) {
+  if (!presetById(seat.preset_id)?.custom_commands_enabled) {
+    return { ok: true, value: { command: null, args_template: null, env: {} } };
+  }
   const command = parseJsonArrayQuiet(seat.command || "");
   const args = parseJsonArrayQuiet(seat.args_template || "");
   const env = parseJsonObjectQuiet(seat.env_json || "");
@@ -477,6 +481,10 @@ function modelConfigFromSeat(seat) {
 }
 
 function modelConfigFromJudge() {
+  const presetId = $("judge-preset")?.value || preferredPresetId();
+  if (!presetById(presetId)?.custom_commands_enabled) {
+    return { ok: true, value: { command: null, args_template: null, env: {} } };
+  }
   const command = parseJsonArrayQuiet($("judge-command")?.value || "");
   const args = parseJsonArrayQuiet($("judge-args")?.value || "");
   const env = parseJsonObjectQuiet($("judge-env")?.value || "");
@@ -550,7 +558,10 @@ function presetNoteText(presetId, lookup = modelLookupForConfig(presetId)) {
   if (lookup.is_loading) return `${preset.description} Checking local models for this configuration...`;
   if (lookup.provider_auth_error) return `${preset.description} ${lookup.provider_auth_error}`;
   if ((lookup.missing_env_vars || []).length) {
-    return `${preset.description} Missing env: ${lookup.missing_env_vars.join(", ")}. Add them below as JSON if needed.`;
+    return `${preset.description} Missing env: ${lookup.missing_env_vars.join(", ")}. Set credentials in the server shell, then refresh.`;
+  }
+  if (preset.requires_command_override && !preset.custom_commands_enabled) {
+    return `${preset.description} Custom commands are disabled by the server's safe-mode configuration.`;
   }
   if (lookup.manual_model_entry) {
     return `${preset.description} Model names are entered manually for this backend configuration.`;
@@ -1627,7 +1638,7 @@ function renderSeatSetup() {
               ${locked ? "disabled" : ""}
             />
           </label>
-          <details class="advanced-panel">
+          <details class="advanced-panel" ${presetById(seat.preset_id)?.custom_commands_enabled ? "" : "hidden"}>
             <summary>Advanced backend settings</summary>
             <label class="field">
               <span>Command Override (JSON array)</span>
@@ -1689,8 +1700,14 @@ function syncPopoverMode() {
 function renderSettingsDrawer() {
   renderSeatSetup();
   renderJudgeModelDropdown();
-  ["judge-name", "judge-preset", "judge-command", "judge-args", "judge-env"].forEach((id) => {
+  ["judge-name", "judge-preset"].forEach((id) => {
     $(id).disabled = Boolean(state.activeSession);
+  });
+  const customJudgeSettingsEnabled = Boolean(
+    presetById($("judge-preset")?.value || preferredPresetId())?.custom_commands_enabled
+  );
+  ["judge-command", "judge-args", "judge-env"].forEach((id) => {
+    $(id).disabled = Boolean(state.activeSession) || !customJudgeSettingsEnabled;
   });
   ["debate-mode", "topic-type", "topic-tags"].forEach((id) => {
     $(id).disabled = Boolean(state.activeSession);

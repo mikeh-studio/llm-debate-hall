@@ -29,7 +29,26 @@ It is built for a very specific kind of experiment: using the local tools you al
 - Structured trace export for later analysis
 - Local SQLite storage for sessions, messages, and scores
 
-The judge is stateless and evaluates from the stored transcript. Supported provider defaults currently map to `codex exec` and `claude -p`. Gemini still needs a manual command override in this build.
+The judge is stateless and evaluates a blinded stored transcript with a strict scorecard. Supported provider defaults currently map to `codex exec` and `claude -p`. Gemini still needs a manual command override in this build, and custom commands are disabled by default.
+
+## Local Security Model
+
+Multi-Agent Council launches local provider processes, so its trust boundary is deliberately narrow:
+
+- HTTP and WebSocket requests are accepted only from loopback clients by default.
+- The frontend is same-origin; the server does not grant wildcard cross-origin access.
+- Built-in provider commands inherit credentials from the server shell.
+- Browser-supplied command, argument, and environment overrides are rejected by default.
+- Session APIs and exports redact stored environment values, including in explicitly unsafe override mode.
+
+Set provider credentials in the shell that launches `uvicorn`, rather than entering secrets in the browser. For trusted local development only, custom backends can be enabled with:
+
+```bash
+MULTI_AGENT_COUNCIL_ENABLE_CUSTOM_COMMANDS=true \
+uvicorn llm_debate_hall.main:app --reload
+```
+
+This opt-in permits arbitrary local executable and environment overrides. Do not enable it for an app exposed to other users. `MULTI_AGENT_COUNCIL_ALLOW_REMOTE_ACCESS=true` disables the loopback-client check but does not add authentication; use it only behind a separately authenticated boundary.
 
 ## Provider Model Readiness
 
@@ -57,7 +76,7 @@ Personas remain editable in the app, and the Chamber supports a dark theme for l
 
 ![Personas in dark mode](docs/screenshots/personas_dark_mode.png)
 
-## Quick Start
+## Quick Local App Startup
 
 ```bash
 cd multi-agent-council
@@ -68,6 +87,34 @@ uvicorn llm_debate_hall.main:app --reload
 ```
 
 Open `http://127.0.0.1:8000`.
+
+Expected UI checks:
+
+- The Chamber setup renders with the topic field, debater seats, and judge controls.
+- Preset and model selectors populate from local provider tooling or show actionable unavailable/auth notes.
+- The Personas view opens and existing persona icons render.
+
+## No-Auth Mock Demo
+
+Use the mock demo when you want to exercise the UI without provider CLIs, provider auth, or API keys. It exposes the hidden `Mock Backend` preset and writes demo state to a throwaway SQLite database under `/tmp`.
+
+```bash
+cd llm-debate-hall
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev]
+MULTI_AGENT_COUNCIL_ENABLE_MOCK_PRESET=true \
+MULTI_AGENT_COUNCIL_DB_PATH=/tmp/multi-agent-council-demo.db \
+uvicorn llm_debate_hall.main:app --reload
+```
+
+Open `http://127.0.0.1:8000`, choose `Mock Backend` / `mock-model` for each debater and the judge, then click `Start Debate`.
+
+Expected UI checks:
+
+- The preset selector includes `Mock Backend`.
+- The Chamber shows persona selection, an active speaker, and transcript entries instead of staying blank.
+- `Trace JSON` opens with events for the same mock session.
 
 ## Validation
 
@@ -84,11 +131,38 @@ When validating debate startup, confirm the Chamber shows persona selection, the
 For observability changes, verify the Chamber trace timeline and `Trace JSON` export reflect the same session state.
 For persona workflow changes, verify persona generation, icon rendering, and save/edit flows in the Personas view.
 
+## Comparative Evaluation
+
+The versioned evaluation harness compares a direct single-model answer with an answer synthesized from a three-persona council. Pairwise answer order and persona seat order are randomized from a recorded seed, judges see labels `A` and `B` instead of system identities, and every judgment must provide complete scores for correctness, completeness, reasoning, and clarity.
+
+Start with the deterministic no-cost smoke path:
+
+```bash
+python3 scripts/run_evaluation.py --preset mock --model mock-model --limit 2
+```
+
+For a real-provider sample, use a separate judge when possible:
+
+```bash
+python3 scripts/run_evaluation.py \
+  --preset openai \
+  --model gpt-5.4 \
+  --judge-preset anthropic \
+  --judge-model sonnet \
+  --limit 5 \
+  --repetitions 3 \
+  --seed 42
+```
+
+The default question set contains 30 prompts across AI, policy, ethics, product, science, and general reasoning in `evals/questions_v1.json`. Reports are written under `artifacts/evaluations/` as JSON plus Markdown and include full transcripts, raw blinded scorecards, heuristic token/cost comparisons, and a Wilson 95% confidence interval for the council win rate.
+
+The direct baseline is intentionally a single answer while the council uses nine debate turns plus synthesis, so this measures quality gain together with its compute cost; it is not yet a budget-matched comparison or a substitute for human/ground-truth evaluation.
+
 ## Local Session Data
 
 Runtime sessions are stored in local SQLite files such as `multi_agent_council.db`. Those files, SQLite sidecars, and local `sessions/` directories are ignored by `.gitignore`; do not commit saved council runs or exported local evidence unless a test fixture explicitly requires it. Existing `llm_debate_hall.db` files are still detected for local backwards compatibility.
 
-## Live Debate Smoke Test
+## Real-Provider Smoke Test
 
 This repo now includes a repo-local Codex skill at `.codex/skills/live-debate-smoke/SKILL.md` plus a runner script that executes a real 3-debater smoke test on a fixed AGI safety topic. The smoke test is meant to answer one question quickly: does the end-to-end live debate path still work with real providers, real turns, and real persisted transcript output?
 

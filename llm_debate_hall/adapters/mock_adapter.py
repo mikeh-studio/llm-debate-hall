@@ -53,14 +53,44 @@ class MockDebateAdapter(DebateAdapter):
                 }
             )
         elif request.output_mode == "judge":
-            winner = self._winner_from_prompt(request.prompt)
+            labels = self._candidate_labels_from_prompt(request.prompt)
+            winner = labels[0] if labels else "A"
+            criteria = {
+                name: {
+                    "scores": {label: (8.0 if label == winner else 6.0) for label in labels},
+                    "notes": f"Candidate {winner} performed best on {name}.",
+                }
+                for name in ("coherence", "responsiveness", "evidence", "style")
+            }
             raw_text = json.dumps(
                 {
-                    "winner_agent_id": winner,
+                    "winner_label": winner,
                     "rationale": "The winning agent was more responsive and internally coherent.",
+                    "criteria": criteria,
+                }
+            )
+        elif request.output_mode == "evaluation_baseline":
+            raw_text = (
+                "The direct baseline gives a concise answer, states its assumptions, and names one practical tradeoff."
+            )
+        elif request.output_mode == "evaluation_synthesis":
+            raw_text = (
+                "The council synthesis combines the strongest claims, resolves the central disagreement, "
+                "and gives a concrete recommendation with a limitation."
+            )
+        elif request.output_mode == "evaluation_pairwise_judge":
+            labels = self._candidate_labels_from_prompt(request.prompt)
+            winner = labels[0] if labels else "A"
+            raw_text = json.dumps(
+                {
+                    "winner_label": winner,
+                    "rationale": f"Candidate {winner} is the stronger answer overall.",
                     "criteria": {
-                        "coherence": {"winner": winner, "notes": "Clearer structure."},
-                        "responsiveness": {"winner": winner, "notes": "Addressed the rebuttals directly."},
+                        name: {
+                            "scores": {label: (8.0 if label == winner else 6.0) for label in labels},
+                            "notes": f"Candidate {winner} performed best on {name}.",
+                        }
+                        for name in ("correctness", "completeness", "reasoning", "clarity")
                     },
                 }
             )
@@ -83,18 +113,20 @@ class MockDebateAdapter(DebateAdapter):
                 }
             )
 
-        display_text = json.loads(raw_text).get("display_text", raw_text)
+        try:
+            display_text = json.loads(raw_text).get("display_text", raw_text)
+        except json.JSONDecodeError:
+            display_text = raw_text
         for start in range(0, len(display_text), 24):
             await on_chunk(display_text[start : start + 24])
             await asyncio.sleep(0.005)
         return AdapterResponse(raw_text=raw_text, stream_status="simulated")
 
-    def _winner_from_prompt(self, prompt: str) -> str:
+    def _candidate_labels_from_prompt(self, prompt: str) -> list[str]:
         for line in prompt.splitlines():
             if line.startswith("CANDIDATES:"):
-                parts = [item.strip() for item in line.split(":", 1)[1].split(",") if item.strip()]
-                return parts[0] if parts else "unknown"
-        return "unknown"
+                return [item.strip() for item in line.split(":", 1)[1].split(",") if item.strip()]
+        return []
 
     def _line_value(self, prompt: str, prefix: str) -> str:
         for line in prompt.splitlines():

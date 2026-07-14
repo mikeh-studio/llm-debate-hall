@@ -1,5 +1,9 @@
-##Test Set one
-Seat 1 : Name: OpenAI CLI, Model: gpt-5.4 high, Persona: Altmanism
-Seat 2: Claude CLI, Model: Opus 4.6, Persona: Darioism
-Referee: Gemini CLI, Model: Gemini 3.0, Peronsa: Muskist 
-Debate QuestioN: If AI can outperform humans in intelligence, creativity, and even emotional support, what remains uniquely valuable about being human?
+# Legacy Test Notes
+
+The executable, versioned evaluation set now lives in `evals/questions_v1.json` and is run with:
+
+```bash
+python3 scripts/run_evaluation.py --preset mock --model mock-model --limit 2
+```
+
+Use `--preset`, `--model`, `--judge-preset`, and `--judge-model` to run real-provider comparisons. Generated evidence is written under `artifacts/evaluations/` and is intentionally ignored by Git.

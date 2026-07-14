@@ -19,6 +19,14 @@ def env_flag(name: str) -> bool:
     return str(env_value(name, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def custom_commands_enabled() -> bool:
+    return env_flag("ENABLE_CUSTOM_COMMANDS")
+
+
+def remote_access_enabled() -> bool:
+    return env_flag("ALLOW_REMOTE_ACCESS")
+
+
 def default_db_path(project_root: Path) -> str:
     preferred = project_root / DEFAULT_DB_FILENAME
     legacy = project_root / LEGACY_DB_FILENAME

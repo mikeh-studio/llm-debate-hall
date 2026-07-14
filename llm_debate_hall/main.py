@@ -8,15 +8,15 @@ import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from llm_debate_hall.adapters.base import AdapterRequest, PRESET_REGISTRY
-from llm_debate_hall.config import APP_NAME, APP_SLUG, default_db_path, env_value
+from llm_debate_hall.config import APP_NAME, APP_SLUG, default_db_path, env_value, remote_access_enabled
 from llm_debate_hall.engine import DebateEngine
 from llm_debate_hall.model_catalog import assert_active_model, model_lookup_payload, visible_presets
 from llm_debate_hall.events import EventBroker
+from llm_debate_hall.judging import JudgeDecisionError
 from llm_debate_hall.models import (
     CreateSessionRequest,
     HumanVoteRequest,
@@ -31,6 +31,7 @@ from llm_debate_hall.models import (
     WorkspaceSuggestionRequest,
 )
 from llm_debate_hall.storage import Storage
+from llm_debate_hall.security import LocalOnlyMiddleware, assert_backend_configuration_is_safe
 from llm_debate_hall.workspace import suggest_workspace_metadata
 
 
@@ -90,14 +91,9 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
     app.state.storage = storage
     app.state.engine = engine
     app.state.broker = broker
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    app.state.local_only = not remote_access_enabled()
+    if app.state.local_only:
+        app.add_middleware(LocalOnlyMiddleware)
 
     app.mount("/persona-icons", StaticFiles(directory=storage.persona_icons_dir), name="persona-icons")
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -140,11 +136,22 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
 
     @app.post("/api/presets/{preset_id}/models")
     async def lookup_preset_models(preset_id: str, payload: ModelLookupRequest) -> dict:
+        preset = PRESET_REGISTRY.get(preset_id)
+        if preset is None:
+            raise HTTPException(status_code=400, detail=f"Unknown preset: {preset_id}")
+        command = payload.command if payload.command is not None else list(preset.command)
+        args_template = payload.args_template if payload.args_template is not None else list(preset.args_template)
+        assert_backend_configuration_is_safe(
+            preset,
+            command=command,
+            args_template=args_template,
+            env=payload.env,
+        )
         try:
             return model_lookup_payload(
                 preset_id,
-                command=payload.command,
-                args_template=payload.args_template,
+                command=command,
+                args_template=args_template,
                 env=payload.env,
                 refresh=payload.refresh,
             )
@@ -186,6 +193,12 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             "args_template": payload.judge.args_template or judge_preset.args_template,
             "env": payload.judge.env,
         }
+        assert_backend_configuration_is_safe(
+            judge_preset,
+            command=judge_agent["command"],
+            args_template=judge_agent["args_template"],
+            env=judge_agent["env"],
+        )
         assert_active_model(
             preset_id=payload.judge.preset_id,
             model_name=payload.judge.model_name,
@@ -244,6 +257,12 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             "args_template": payload.judge.args_template or judge_preset.args_template,
             "env": payload.judge.env,
         }
+        assert_backend_configuration_is_safe(
+            judge_preset,
+            command=judge_agent["command"],
+            args_template=judge_agent["args_template"],
+            env=judge_agent["env"],
+        )
         assert_active_model(
             preset_id=payload.judge.preset_id,
             model_name=payload.judge.model_name,
@@ -302,6 +321,12 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             raise HTTPException(status_code=400, detail=f"Unknown preset: {payload.generator.preset_id}")
         command = payload.generator.command or preset.command
         args_template = payload.generator.args_template or preset.args_template
+        assert_backend_configuration_is_safe(
+            preset,
+            command=command,
+            args_template=args_template,
+            env=payload.generator.env,
+        )
         assert_active_model(
             preset_id=payload.generator.preset_id,
             model_name=payload.generator.model_name,
@@ -356,12 +381,12 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
 
     @app.get("/api/sessions")
     async def list_sessions() -> list[dict]:
-        return storage.list_sessions()
+        return storage.list_public_sessions()
 
     @app.get("/api/sessions/{session_id}")
     async def get_session(session_id: str) -> dict:
         try:
-            return storage.get_session(session_id)
+            return storage.get_public_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -384,6 +409,12 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
                 raise HTTPException(status_code=400, detail=f"Unknown preset: {agent.preset_id}")
             command = agent.command or preset.command
             args_template = agent.args_template or preset.args_template
+            assert_backend_configuration_is_safe(
+                preset,
+                command=command,
+                args_template=args_template,
+                env=agent.env,
+            )
             assert_active_model(
                 preset_id=agent.preset_id,
                 model_name=agent.model_name,
@@ -411,6 +442,12 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             raise HTTPException(status_code=400, detail=f"Unknown preset: {payload.judge.preset_id}")
         judge_command = payload.judge.command or judge_preset.command
         judge_args_template = payload.judge.args_template or judge_preset.args_template
+        assert_backend_configuration_is_safe(
+            judge_preset,
+            command=judge_command,
+            args_template=judge_args_template,
+            env=payload.judge.env,
+        )
         assert_active_model(
             preset_id=payload.judge.preset_id,
             model_name=payload.judge.model_name,
@@ -436,18 +473,19 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             topic_type=payload.topic_type,
             topic_tags=payload.topic_tags,
         )
-        return session
+        return storage.get_public_session(session["id"])
 
     @app.patch("/api/sessions/{session_id}/metadata")
     async def update_session_metadata(session_id: str, payload: SessionMetadataUpdate) -> dict:
         try:
-            return storage.update_session_metadata(
+            session = storage.update_session_metadata(
                 session_id,
                 debate_mode=payload.debate_mode,
                 topic_type=payload.topic_type,
                 topic_tags=payload.topic_tags,
                 debater_sentiments=payload.debater_sentiments,
             )
+            return storage.get_public_session(session["id"])
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -518,7 +556,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
                 "provider_session": None,
             },
         )
-        return storage.get_session(session_id)
+        return storage.get_public_session(session_id)
 
     @app.post("/api/sessions/{session_id}/moderator-note")
     async def add_moderator_note(session_id: str, payload: ModeratorNoteRequest) -> dict:
@@ -554,7 +592,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
         if session["status"] not in {"awaiting_continue", "running"}:
             raise HTTPException(status_code=400, detail="Session cannot be ended right now.")
         await engine.end_session(session_id)
-        return storage.get_session(session_id)
+        return storage.get_public_session(session_id)
 
     @app.post("/api/sessions/{session_id}/judge-decision")
     async def judge_decision(session_id: str, payload: JudgeDecisionRequest) -> dict:
@@ -570,6 +608,12 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             raise HTTPException(status_code=400, detail=f"Unknown preset: {payload.judge.preset_id}")
         judge_command = payload.judge.command or judge_preset.command
         judge_args_template = payload.judge.args_template or judge_preset.args_template
+        assert_backend_configuration_is_safe(
+            judge_preset,
+            command=judge_command,
+            args_template=judge_args_template,
+            env=payload.judge.env,
+        )
         assert_active_model(
             preset_id=payload.judge.preset_id,
             model_name=payload.judge.model_name,
@@ -577,21 +621,24 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             args_template=judge_args_template,
             env=payload.judge.env,
         )
-        decision = await engine.decide_winner(
-            session_id,
-            {
-                "id": "judge-override",
-                "display_name": payload.judge.display_name,
-                "role": "judge",
-                "side": "judge",
-                "preset_id": payload.judge.preset_id,
-                "model_name": payload.judge.model_name,
-                "command": judge_command,
-                "args_template": judge_args_template,
-                "env": payload.judge.env,
-            },
-        )
-        return decision
+        try:
+            decision = await engine.decide_winner(
+                session_id,
+                {
+                    "id": "judge-override",
+                    "display_name": payload.judge.display_name,
+                    "role": "judge",
+                    "side": "judge",
+                    "preset_id": payload.judge.preset_id,
+                    "model_name": payload.judge.model_name,
+                    "command": judge_command,
+                    "args_template": judge_args_template,
+                    "env": payload.judge.env,
+                },
+            )
+        except JudgeDecisionError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return storage.get_public_session(decision["id"])
 
     @app.post("/api/sessions/{session_id}/vote")
     async def set_vote(session_id: str, payload: HumanVoteRequest) -> dict:
@@ -604,7 +651,7 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
             raise HTTPException(status_code=400, detail="Winner must be one of the debate agents.")
         storage.set_human_vote(session_id, payload.winner_agent_id)
         storage.update_session_status(session_id, "completed")
-        return storage.get_session(session_id)
+        return storage.get_public_session(session_id)
 
     @app.get("/api/sessions/{session_id}/export")
     async def export_session(session_id: str) -> JSONResponse:

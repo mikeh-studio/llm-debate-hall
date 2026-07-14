@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from llm_debate_hall.adapters.base import PRESET_REGISTRY
 from llm_debate_hall.adapters.subprocess_adapter import cached_active_models, catalog_models, probe_active_models
-from llm_debate_hall.config import env_flag
+from llm_debate_hall.config import custom_commands_enabled, env_flag
 
 
 AUTH_CHECK_TIMEOUT_SECONDS = 8
@@ -38,6 +38,7 @@ def visible_presets() -> list[dict[str, Any]]:
             continue
         payload = preset.model_dump()
         payload.update(model_lookup_payload(preset.id, refresh=False))
+        payload["custom_commands_enabled"] = custom_commands_enabled()
         presets.append(payload)
     return presets
 

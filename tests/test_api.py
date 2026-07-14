@@ -74,7 +74,7 @@ def test_preset_model_lookup_returns_exact_config_models(tmp_path: Path, monkeyp
 
     response = client.post(
         "/api/presets/openai/models",
-        json={"env": {"OPENAI_API_KEY": "local"}, "refresh": True},
+        json={"refresh": True},
     )
 
     assert response.status_code == 200
@@ -208,7 +208,21 @@ def test_anthropic_model_lookup_requires_generation_probe_when_logged_in(tmp_pat
     assert any(command[:3] == ["claude", "-p", "--model"] for command in calls)
 
 
-def test_preset_model_lookup_exposes_manual_entry_for_overrides(tmp_path: Path) -> None:
+def test_preset_model_lookup_blocks_manual_overrides_by_default(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/presets/openai/models",
+        json={"command": ["custom-cli"], "args_template": ["--model", "{model}"], "refresh": True},
+    )
+
+    assert response.status_code == 403
+    assert "ENABLE_CUSTOM_COMMANDS" in response.text
+
+
+def test_preset_model_lookup_exposes_manual_entry_when_explicitly_enabled(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MULTI_AGENT_COUNCIL_ENABLE_CUSTOM_COMMANDS", "true")
     app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
     client = TestClient(app)
 
@@ -456,6 +470,8 @@ def test_api_session_flow_pause_then_judge_decision(tmp_path: Path) -> None:
     assert judged.status_code == 200
     assert judged.json()["status"] == "completed"
     assert judged.json()["judge_score"] is not None
+    stored_judge = next(agent for agent in judged.json()["agents"] if agent["role"] == "judge")
+    assert judged.json()["judge_score"]["judge_agent_id"] == stored_judge["id"]
 
 
 def test_api_manual_vote_completes_session(tmp_path: Path) -> None:

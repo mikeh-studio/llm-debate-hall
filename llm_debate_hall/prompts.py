@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from llm_debate_hall.payloads import single_paragraph
@@ -125,18 +126,56 @@ def build_persistent_turn_prompt(
     )
 
 
-def build_judge_prompt(topic: str, session: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
-    transcript = summarize_messages(session, max_items=16)
-    candidate_ids = ", ".join(agent["id"] for agent in candidates)
+JUDGE_CRITERIA = ("coherence", "responsiveness", "evidence", "style")
+
+
+def build_judge_prompt(
+    topic: str,
+    session: dict[str, Any],
+    label_by_agent_id: dict[str, str],
+) -> str:
+    transcript = _blinded_transcript(session, label_by_agent_id)
+    candidate_labels = ", ".join(sorted(label_by_agent_id.values()))
+    score_shape = ", ".join(f'"{label}": 0' for label in sorted(label_by_agent_id.values()))
     return (
-        "Judge the debate.\n"
+        "Judge the debate without trying to infer candidate identity, provider, persona, or seat order.\n"
         f"TOPIC: {topic}\n"
-        f"CANDIDATES: {candidate_ids}\n"
-        "CRITERIA: coherence, responsiveness, evidence, style\n"
-        "TRANSCRIPT SUMMARY:\n"
+        f"CANDIDATES: {candidate_labels}\n"
+        f"CRITERIA: {', '.join(JUDGE_CRITERIA)}\n"
+        "Score every candidate from 0 to 10 on every criterion. Select exactly one winner.\n"
+        "BLINDED FULL TRANSCRIPT:\n"
         f"{transcript}\n"
-        'Return JSON: {"winner_agent_id":"...", "rationale":"...", "criteria":{...}}'
+        "Return only JSON with this shape: "
+        f'{{"winner_label":"A", "rationale":"...", "criteria":'
+        f'{{"coherence":{{"scores":{{{score_shape}}},"notes":"..."}},'
+        f'"responsiveness":{{"scores":{{{score_shape}}},"notes":"..."}},'
+        f'"evidence":{{"scores":{{{score_shape}}},"notes":"..."}},'
+        f'"style":{{"scores":{{{score_shape}}},"notes":"..."}}}}}}'
     )
+
+
+def _blinded_transcript(session: dict[str, Any], label_by_agent_id: dict[str, str]) -> str:
+    entries = conversation_entries(session)
+    if not entries:
+        return "No prior turns."
+    name_to_label = {
+        agent["display_name"]: f"Candidate {label_by_agent_id[agent['id']]}"
+        for agent in session.get("agents", [])
+        if agent.get("id") in label_by_agent_id
+    }
+    lines: list[str] = []
+    for item in entries:
+        agent_id = item.get("agent_id")
+        if agent_id in label_by_agent_id:
+            speaker = f"Candidate {label_by_agent_id[agent_id]}"
+        else:
+            speaker = "Moderator"
+        phase = item.get("round_type") or item.get("kind", "entry")
+        display_text = single_paragraph(item["display_text"])
+        for display_name, replacement in name_to_label.items():
+            display_text = re.sub(re.escape(display_name), replacement, display_text, flags=re.IGNORECASE)
+        lines.append(f"{phase} | {speaker} | {display_text}")
+    return "\n".join(lines)
 
 
 def conversation_entries(session: dict[str, Any]) -> list[dict[str, Any]]:

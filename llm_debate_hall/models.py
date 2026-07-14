@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PersonaModel(BaseModel):
@@ -148,8 +146,22 @@ class TurnPayload(BaseModel):
     raw_text: str | None = None
 
 
+class JudgeCriterionModel(BaseModel):
+    scores: dict[str, float]
+    notes: str = Field(min_length=1)
+
+    @field_validator("scores")
+    @classmethod
+    def validate_scores(cls, scores: dict[str, float]) -> dict[str, float]:
+        if not scores:
+            raise ValueError("criterion scores cannot be empty")
+        if any(score < 0 or score > 10 for score in scores.values()):
+            raise ValueError("criterion scores must be between 0 and 10")
+        return scores
+
+
 class JudgePayload(BaseModel):
-    winner_agent_id: str
-    rationale: str
-    criteria: dict[str, dict[str, Any]]
+    winner_label: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    criteria: dict[str, JudgeCriterionModel]
     raw_text: str | None = None

@@ -8,9 +8,11 @@ Multi-Agent Council is a for-fun experimental project. Small fixes, bug reports,
 2. Run `node --check llm_debate_hall/static/app.js`.
 3. Run `PYTHONPYCACHEPREFIX=/tmp/multi-agent-council-pyc python3 -m compileall llm_debate_hall tests`.
 4. For UI or orchestration changes, run the live app with `uvicorn llm_debate_hall.main:app --reload` and verify the flow in the browser at `http://127.0.0.1:8000`.
-5. For debate-start changes, confirm the Chamber shows persona selection, an active speaker, or transcript entries after `Start Debate` instead of remaining blank.
-6. For real-provider runtime or subprocess changes, run `python3 scripts/run_live_debate_smoke.py` if the required local CLIs are available.
-7. For observability changes, verify the latest-turn metrics, trace timeline, and `Trace JSON` export all match the same session.
+5. Keep built-in provider execution compatible with safe mode. Tests that exercise custom commands must opt in with `MULTI_AGENT_COUNCIL_ENABLE_CUSTOM_COMMANDS=true`, and secrets must never appear in API responses, exports, fixtures, or logs.
+6. For judging or prompt changes, run `python3 scripts/run_evaluation.py --preset mock --model mock-model --limit 2` and inspect both generated report formats.
+7. For debate-start changes, confirm the Chamber shows persona selection, an active speaker, or transcript entries after `Start Debate` instead of remaining blank.
+8. For real-provider runtime or subprocess changes, run `python3 scripts/run_live_debate_smoke.py` if the required local CLIs are available.
+9. For observability changes, verify the latest-turn metrics, trace timeline, and `Trace JSON` export all match the same session.
 8. For persona workflow changes, verify generated drafts, persona intensity controls, and persona icons in the Personas view and Chamber.
 9. Check `git status --short` and keep local session databases, SQLite sidecars, generated screenshots, and smoke-test artifacts out of the PR unless they are intentional fixtures.
 10. Include screenshots for visible chamber or layout changes.
