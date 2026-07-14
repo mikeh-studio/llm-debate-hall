@@ -28,7 +28,16 @@ from llm_debate_hall.models import BackendPresetModel
 
 
 JSON_OUTPUT_MODES = frozenset(
-    {"persona", "persona_generation", "opening", "reply", "judge", "question_validation", "question_suggestions"}
+    {
+        "persona",
+        "persona_generation",
+        "opening",
+        "reply",
+        "judge",
+        "question_validation",
+        "question_suggestions",
+        "evaluation_pairwise_judge",
+    }
 )
 MODEL_ERROR_MARKERS = (
     "selected model",

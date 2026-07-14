@@ -1,0 +1,155 @@
+{
+  "version": "v1",
+  "questions": [
+    {
+      "id": "ai-governance-01",
+      "category": "AI & Technology",
+      "question": "Should organizations require independent safety evaluations before deploying highly capable AI systems?"
+    },
+    {
+      "id": "ai-governance-02",
+      "category": "AI & Technology",
+      "question": "When an AI system makes a consequential recommendation, who should remain accountable for the outcome?"
+    },
+    {
+      "id": "ai-governance-03",
+      "category": "AI & Technology",
+      "question": "Should open-source AI models face different safety requirements from closed commercial models?"
+    },
+    {
+      "id": "ai-governance-04",
+      "category": "AI & Technology",
+      "question": "Is interpretability a necessary condition for trusting advanced AI systems in critical infrastructure?"
+    },
+    {
+      "id": "ai-governance-05",
+      "category": "AI & Technology",
+      "question": "Should autonomous AI agents be allowed to spend money or enter contracts without case-by-case human approval?"
+    },
+    {
+      "id": "policy-01",
+      "category": "Policy",
+      "question": "Should cities replace fixed public-transit fares with income-adjusted pricing?"
+    },
+    {
+      "id": "policy-02",
+      "category": "Policy",
+      "question": "Would a carbon dividend be more effective and equitable than industry-specific emissions rules?"
+    },
+    {
+      "id": "policy-03",
+      "category": "Policy",
+      "question": "Should governments require algorithmic impact assessments for automated public-benefit decisions?"
+    },
+    {
+      "id": "policy-04",
+      "category": "Policy",
+      "question": "When housing supply is scarce, should zoning reform take priority over rent stabilization?"
+    },
+    {
+      "id": "policy-05",
+      "category": "Policy",
+      "question": "Should public agencies favor evidence from randomized trials over local stakeholder testimony when the two conflict?"
+    },
+    {
+      "id": "ethics-01",
+      "category": "Ethics",
+      "question": "Is it ethical to use persuasive technology when it benefits users but weakens their ability to disengage?"
+    },
+    {
+      "id": "ethics-02",
+      "category": "Ethics",
+      "question": "Should a company release research that has substantial public benefit but a credible risk of serious misuse?"
+    },
+    {
+      "id": "ethics-03",
+      "category": "Ethics",
+      "question": "When individual privacy conflicts with population-level health research, which should receive greater weight?"
+    },
+    {
+      "id": "ethics-04",
+      "category": "Ethics",
+      "question": "Does a decision remain fair if everyone follows the same rule but the starting conditions are unequal?"
+    },
+    {
+      "id": "ethics-05",
+      "category": "Ethics",
+      "question": "Should future generations have formal representation in present-day infrastructure and climate decisions?"
+    },
+    {
+      "id": "product-01",
+      "category": "Product",
+      "question": "Should an early-stage product team prioritize retention improvements over acquiring more users?"
+    },
+    {
+      "id": "product-02",
+      "category": "Product",
+      "question": "When user requests conflict, should a product team optimize for its most engaged users or its largest user segment?"
+    },
+    {
+      "id": "product-03",
+      "category": "Product",
+      "question": "Is it better to delay a launch for stronger reliability or launch earlier to learn from real usage?"
+    },
+    {
+      "id": "product-04",
+      "category": "Product",
+      "question": "Should default settings optimize for user convenience even when safer settings require more effort?"
+    },
+    {
+      "id": "product-05",
+      "category": "Product",
+      "question": "When a metric improves after a redesign, what evidence is needed before attributing the improvement to the redesign?"
+    },
+    {
+      "id": "science-01",
+      "category": "Science",
+      "question": "When two studies disagree, how should decision-makers weigh sample size, design quality, and external validity?"
+    },
+    {
+      "id": "science-02",
+      "category": "Science",
+      "question": "Should exploratory scientific findings be shared publicly before independent replication?"
+    },
+    {
+      "id": "science-03",
+      "category": "Science",
+      "question": "When is a mechanistic explanation more valuable than a highly accurate predictive model?"
+    },
+    {
+      "id": "science-04",
+      "category": "Science",
+      "question": "How should researchers respond when statistically significant results have very small practical effects?"
+    },
+    {
+      "id": "science-05",
+      "category": "Science",
+      "question": "Should scientific funding favor a few high-risk projects or many projects with moderate expected value?"
+    },
+    {
+      "id": "reasoning-01",
+      "category": "Reasoning",
+      "question": "What is the strongest argument for making an important decision before all relevant information is available?"
+    },
+    {
+      "id": "reasoning-02",
+      "category": "Reasoning",
+      "question": "How should a team distinguish healthy disagreement from disagreement caused by ambiguous definitions?"
+    },
+    {
+      "id": "reasoning-03",
+      "category": "Reasoning",
+      "question": "When should a surprising anecdote cause someone to revise a conclusion supported by aggregate data?"
+    },
+    {
+      "id": "reasoning-04",
+      "category": "Reasoning",
+      "question": "How can a decision-maker compare a reversible option with an irreversible option that has higher expected value?"
+    },
+    {
+      "id": "reasoning-05",
+      "category": "Reasoning",
+      "question": "What evidence would justify abandoning a strategy that has not yet had enough time to show results?"
+    }
+  ]
+}

@@ -12,6 +12,7 @@ from typing import Any
 from llm_debate_hall.models import PersonaCreate, PersonaModel, PersonaUpdate
 from llm_debate_hall.persona_icons import ensure_persona_icon, generated_persona_icons_dir
 from llm_debate_hall.personas import builtin_personas_dir, custom_personas_dir, load_persona_payload, personas_root
+from llm_debate_hall.security import redact_agent_environment
 from llm_debate_hall.workspace import (
     DEFAULT_DEBATE_MODE,
     DEFAULT_SENTIMENT,
@@ -51,6 +52,7 @@ class Storage:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     def _ensure_db(self) -> None:
@@ -377,6 +379,9 @@ class Storage:
             for row in sessions
         ]
 
+    def list_public_sessions(self) -> list[dict[str, Any]]:
+        return [self._redact_session(session) for session in self.list_sessions()]
+
     def get_session(self, session_id: str) -> dict[str, Any]:
         with self._connect() as conn:
             session = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -444,6 +449,9 @@ class Storage:
             for row in trace_events
         ]
         return payload
+
+    def get_public_session(self, session_id: str) -> dict[str, Any]:
+        return self._redact_session(self.get_session(session_id))
 
     def update_session_status(self, session_id: str, status: str) -> None:
         with self._lock, self._connect() as conn:
@@ -751,7 +759,13 @@ class Storage:
             conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
     def export_session(self, session_id: str) -> dict[str, Any]:
-        return self.get_session(session_id)
+        return self.get_public_session(session_id)
+
+    def _redact_session(self, session: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **session,
+            "agents": [redact_agent_environment(agent) for agent in session.get("agents", [])],
+        }
 
     def _ensure_persona_store(self) -> None:
         self._builtin_dir.mkdir(parents=True, exist_ok=True)

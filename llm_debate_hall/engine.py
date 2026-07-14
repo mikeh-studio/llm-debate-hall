@@ -107,7 +107,8 @@ class DebateEngine:
 
     async def decide_winner(self, session_id: str, judge_override: dict[str, Any] | None = None) -> dict[str, Any]:
         session = self.storage.get_session(session_id)
-        judge = judge_override or next(agent for agent in session["agents"] if agent["role"] == "judge")
+        stored_judge = next(agent for agent in session["agents"] if agent["role"] == "judge")
+        judge = {**stored_judge, **(judge_override or {}), "id": stored_judge["id"]}
         await self._judge_session(session_id, session["topic"], judge)
         self.storage.update_session_status(session_id, "completed")
         await self.broker.publish(session_id, {"type": "status", "status": "completed"})
@@ -413,9 +414,9 @@ class DebateEngine:
         self,
         topic: str,
         session: dict[str, Any],
-        candidates: list[dict[str, Any]],
+        label_by_agent_id: dict[str, str],
     ) -> str:
-        return build_judge_prompt(topic, session, candidates)
+        return build_judge_prompt(topic, session, label_by_agent_id)
 
     def _conversation_entries(self, session: dict[str, Any]) -> list[dict[str, Any]]:
         return conversation_entries(session)

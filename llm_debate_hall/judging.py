@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import random
 from typing import Any, Callable
+
+from pydantic import ValidationError
 
 from llm_debate_hall.adapters.base import AdapterRequest, DebateAdapter
 from llm_debate_hall.events import EventBroker
 from llm_debate_hall.observability import TracePublisher
+from llm_debate_hall.models import JudgePayload
 from llm_debate_hall.payloads import required_json
-from llm_debate_hall.prompts import build_judge_prompt
+from llm_debate_hall.prompts import JUDGE_CRITERIA, build_judge_prompt
 from llm_debate_hall.storage import Storage
+
+
+class JudgeDecisionError(RuntimeError):
+    pass
 
 
 class JudgeService:
@@ -27,7 +35,14 @@ class JudgeService:
     async def judge_session(self, session_id: str, topic: str, judge: dict[str, Any]) -> None:
         session = self.storage.get_session(session_id)
         candidates = [agent for agent in session["agents"] if agent["role"] == "debater"]
-        prompt = build_judge_prompt(topic, session, candidates)
+        shuffled_candidates = list(candidates)
+        random.Random(session_id).shuffle(shuffled_candidates)
+        labels = [chr(ord("A") + index) for index in range(len(shuffled_candidates))]
+        label_by_agent_id = {
+            agent["id"]: label for agent, label in zip(shuffled_candidates, labels, strict=True)
+        }
+        agent_id_by_label = {label: agent_id for agent_id, label in label_by_agent_id.items()}
+        prompt = build_judge_prompt(topic, session, label_by_agent_id)
         request = AdapterRequest(
             session_id=session_id,
             agent_id=judge["id"],
@@ -45,21 +60,33 @@ class JudgeService:
         )
         adapter = self.adapter_factory(judge)
         response = await adapter.generate(request, _noop)
-        payload = required_json(
-            response.raw_text,
-            context=f"{judge['display_name']} judge decision",
-            preset_id=judge["preset_id"],
-            model_name=judge["model_name"],
-        )
-        winner_agent_id = payload.get("winner_agent_id")
-        if not any(agent["id"] == winner_agent_id for agent in candidates):
-            winner_agent_id = candidates[0]["id"]
+        try:
+            raw_payload = required_json(
+                response.raw_text,
+                context=f"{judge['display_name']} judge decision",
+                preset_id=judge["preset_id"],
+                model_name=judge["model_name"],
+            )
+        except RuntimeError as exc:
+            raise JudgeDecisionError(str(exc)) from exc
+        payload = _validated_judge_payload(raw_payload, set(agent_id_by_label))
+        winner_agent_id = agent_id_by_label[payload.winner_label]
+        criteria = {
+            criterion: {
+                "scores": {
+                    agent_id_by_label[label]: score
+                    for label, score in criterion_payload.scores.items()
+                },
+                "notes": criterion_payload.notes,
+            }
+            for criterion, criterion_payload in payload.criteria.items()
+        }
         score = self.storage.add_judge_score(
             session_id=session_id,
             judge_agent_id=judge["id"],
             winner_agent_id=winner_agent_id,
-            rationale=payload.get("rationale", "No rationale provided."),
-            criteria=payload.get("criteria", {}),
+            rationale=payload.rationale,
+            criteria=criteria,
             raw_text=response.raw_text,
         )
         thread_entry = self.storage.add_thread_entry(
@@ -90,3 +117,26 @@ class JudgeService:
 
 async def _noop(_: str) -> None:
     return None
+
+
+def _validated_judge_payload(raw_payload: dict[str, Any], labels: set[str]) -> JudgePayload:
+    try:
+        payload = JudgePayload.model_validate(raw_payload)
+    except ValidationError as exc:
+        raise JudgeDecisionError(f"Judge returned an invalid scorecard: {exc}") from exc
+    if payload.winner_label not in labels:
+        raise JudgeDecisionError(
+            f"Judge selected unknown blinded label '{payload.winner_label}'. Expected one of: {', '.join(sorted(labels))}."
+        )
+    missing_criteria = set(JUDGE_CRITERIA) - set(payload.criteria)
+    extra_criteria = set(payload.criteria) - set(JUDGE_CRITERIA)
+    if missing_criteria or extra_criteria:
+        raise JudgeDecisionError(
+            "Judge criteria must be exactly: " + ", ".join(JUDGE_CRITERIA) + "."
+        )
+    for criterion, scorecard in payload.criteria.items():
+        if set(scorecard.scores) != labels:
+            raise JudgeDecisionError(
+                f"Judge criterion '{criterion}' must score every blinded candidate exactly once."
+            )
+    return payload
