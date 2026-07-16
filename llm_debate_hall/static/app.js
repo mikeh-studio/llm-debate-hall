@@ -1346,8 +1346,7 @@ function threadEntryRoleLabel(entry) {
 function threadEntryMoveMarkup(entry) {
   const payload = entry.payload || {};
   const parts = [];
-  if (payload.answered_challenge) {
-    const challenge = payload.answered_challenge;
+  (payload.answered_challenges || []).forEach((challenge) => {
     const question = challenge.question || challenge.quote || "Defend your position.";
     parts.push(`
       <div class="thread-entry-move is-answer">
@@ -1355,7 +1354,7 @@ function threadEntryMoveMarkup(entry) {
         <span class="move-text">${escapeHtml(challenge.challenger_name || "An opponent")} demanded: “${escapeHtml(question)}”</span>
       </div>
     `);
-  }
+  });
   if (payload.move) {
     const move = payload.move;
     const label = MOVE_LABELS[move.type] || "Move";

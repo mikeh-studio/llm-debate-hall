@@ -487,12 +487,34 @@ class Storage:
             raise KeyError(f"Unknown agent: {agent_id}")
         return int(row["moves_remaining"])
 
-    def set_agent_pending_challenge(self, agent_id: str, challenge: dict[str, Any] | None) -> None:
+    def append_agent_pending_challenge(self, agent_id: str, challenge: dict[str, Any]) -> None:
         with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT pending_challenge_json FROM session_agents WHERE id = ?", (agent_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown agent: {agent_id}")
+            challenges = [*self._pending_challenges_from_json(row["pending_challenge_json"]), challenge]
             conn.execute(
                 "UPDATE session_agents SET pending_challenge_json = ? WHERE id = ?",
-                (json.dumps(challenge) if challenge else None, agent_id),
+                (json.dumps(challenges), agent_id),
             )
+
+    def clear_agent_pending_challenges(self, agent_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE session_agents SET pending_challenge_json = NULL WHERE id = ?",
+                (agent_id,),
+            )
+
+    @staticmethod
+    def _pending_challenges_from_json(raw: str | None) -> list[dict[str, Any]]:
+        if not raw:
+            return []
+        payload = json.loads(raw)
+        if isinstance(payload, dict):
+            return [payload]
+        return list(payload)
 
     def get_provider_session(self, agent_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -933,7 +955,7 @@ class Storage:
             "moves_remaining": int(
                 row["moves_remaining"] if row["moves_remaining"] is not None else DEFAULT_MOVE_BUDGET
             ),
-            "pending_challenge": json.loads(row["pending_challenge_json"]) if row["pending_challenge_json"] else None,
+            "pending_challenges": self._pending_challenges_from_json(row["pending_challenge_json"]),
             "ordering": row["ordering"],
         }
 

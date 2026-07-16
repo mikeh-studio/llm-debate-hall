@@ -89,16 +89,23 @@ def test_reply_prompt_includes_debate_actions_and_opening_does_not() -> None:
     assert "reaction" not in opening_prompt
 
     agent["moves_remaining"] = 0
-    agent["pending_challenge"] = {
-        "challenger_name": "Burke",
-        "quote": "your central claim",
-        "question": "What evidence supports this?",
-    }
+    agent["pending_challenges"] = [
+        {
+            "challenger_name": "Burke",
+            "quote": "your central claim",
+            "question": "What evidence supports this?",
+        },
+        {
+            "challenger_name": "Cassius",
+            "question": "Who bears the cost?",
+        },
+    ]
     exhausted_prompt = build_turn_prompt(session, "Topic?", agent, "reply", personas)
 
     assert "You have no action tokens left." in exhausted_prompt
     assert "INCOMING CHALLENGE from Burke" in exhausted_prompt
     assert "What evidence supports this?" in exhausted_prompt
+    assert "INCOMING CHALLENGE from Cassius" in exhausted_prompt
 
 
 def test_storage_move_budget_floor_and_pending_challenge(tmp_path: Path) -> None:
@@ -115,11 +122,13 @@ def test_storage_move_budget_floor_and_pending_challenge(tmp_path: Path) -> None
         remaining = storage.spend_agent_move(agent["id"])
     assert remaining == 0
 
-    challenge = {"challenger_id": "x", "challenger_name": "Burke", "quote": "q", "question": "why"}
-    storage.set_agent_pending_challenge(agent["id"], challenge)
-    assert storage.get_session(session["id"])["agents"][0]["pending_challenge"] == challenge
-    storage.set_agent_pending_challenge(agent["id"], None)
-    assert storage.get_session(session["id"])["agents"][0]["pending_challenge"] is None
+    first = {"challenger_id": "x", "challenger_name": "Burke", "quote": "q", "question": "why"}
+    second = {"challenger_id": "y", "challenger_name": "Cassius", "quote": "", "question": "who pays"}
+    storage.append_agent_pending_challenge(agent["id"], first)
+    storage.append_agent_pending_challenge(agent["id"], second)
+    assert storage.get_session(session["id"])["agents"][0]["pending_challenges"] == [first, second]
+    storage.clear_agent_pending_challenges(agent["id"])
+    assert storage.get_session(session["id"])["agents"][0]["pending_challenges"] == []
 
 
 def _debater(name: str) -> dict:
@@ -213,7 +222,7 @@ def test_engine_enforces_move_budget_and_challenge_obligations(tmp_path: Path) -
     answered = [
         message
         for message in result["messages"]
-        if message["normalized_payload"].get("answered_challenge")
+        if message["normalized_payload"].get("answered_challenges")
     ]
     assert len(answered) == DEFAULT_MOVE_BUDGET
     assert all(message["agent_id"] == agents["Burke"]["id"] for message in answered)
@@ -225,5 +234,34 @@ def test_engine_enforces_move_budget_and_challenge_obligations(tmp_path: Path) -
     assert all(message["normalized_payload"]["reaction"] == "disagree" for message in reply_messages)
 
     # Burke speaks after Athena each round, so every challenge is answered within its round.
-    assert agents["Burke"]["pending_challenge"] is None
-    assert agents["Athena"]["pending_challenge"] is None
+    assert agents["Burke"]["pending_challenges"] == []
+    assert agents["Athena"]["pending_challenges"] == []
+
+
+def test_engine_queues_concurrent_challenges_on_the_same_target(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
+    engine = DebateEngine(storage=storage, broker=EventBroker())
+
+    session = storage.create_session(
+        "Can one debater owe answers to two challengers at once?",
+        [_debater("Athena"), _debater("Burke"), _debater("Cassius")],
+        _judge(),
+    )
+    agents = {agent["display_name"]: agent for agent in session["agents"]}
+
+    # Two challengers pile onto Cassius before Cassius speaks.
+    for challenger in ("Athena", "Burke"):
+        payload = {
+            "move": {
+                "type": "challenge",
+                "target": "Cassius",
+                "quote": "a bold claim",
+                "question": f"{challenger} asks: what evidence?",
+            }
+        }
+        resolved = engine._resolve_move(session, agents[challenger], payload, "reply")
+        assert resolved is not None
+
+    pending = storage.get_session(session["id"])["agents"]
+    cassius = next(agent for agent in pending if agent["display_name"] == "Cassius")
+    assert [item["challenger_name"] for item in cassius["pending_challenges"]] == ["Athena", "Burke"]

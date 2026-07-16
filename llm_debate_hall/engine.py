@@ -250,7 +250,7 @@ class DebateEngine:
         session = self.storage.get_session(session_id)
         # Re-read the agent so move budget and pending challenges reflect earlier turns this round.
         agent = next((item for item in session["agents"] if item["id"] == agent["id"]), agent)
-        incoming_challenge = agent.get("pending_challenge")
+        incoming_challenges = agent.get("pending_challenges") or []
         adapter = self.adapter_factory(agent)
         thread_entry_id = uuid.uuid4().hex
         turn_started_at = time.perf_counter()
@@ -324,9 +324,9 @@ class DebateEngine:
         response = generation.response
         payload = normalize_turn_payload(response.raw_text, agent["display_name"], round_type)
         resolved_move = self._resolve_move(session, agent, payload, round_type)
-        if incoming_challenge:
-            payload["answered_challenge"] = incoming_challenge
-            self.storage.set_agent_pending_challenge(agent["id"], None)
+        if incoming_challenges:
+            payload["answered_challenges"] = incoming_challenges
+            self.storage.clear_agent_pending_challenges(agent["id"])
         usage = estimate_usage(generation.prompt, response.raw_text, agent["preset_id"], agent["model_name"])
         latency_ms = round((time.perf_counter() - turn_started_at) * 1000)
         current_provider_session = self.storage.get_provider_session(agent["id"])
@@ -434,12 +434,13 @@ class DebateEngine:
         agent["moves_remaining"] = moves_remaining
         resolved = {
             **move,
+            "target": target["display_name"],
             "target_agent_id": target["id"],
             "target_name": target["display_name"],
             "moves_remaining": moves_remaining,
         }
         if move["type"] == "challenge":
-            self.storage.set_agent_pending_challenge(
+            self.storage.append_agent_pending_challenge(
                 target["id"],
                 {
                     "challenger_id": agent["id"],

@@ -75,8 +75,7 @@ def debate_actions_block(session: dict[str, Any], agent: dict[str, Any], round_t
         )
     else:
         lines.append("You have no action tokens left. Do not include a move.")
-    pending = agent.get("pending_challenge") or {}
-    if pending:
+    for pending in agent.get("pending_challenges") or []:
         quoted = f' (they quoted you: "{pending.get("quote")}")' if pending.get("quote") else ""
         question = pending.get("question") or "Defend your quoted claim."
         lines.append(
