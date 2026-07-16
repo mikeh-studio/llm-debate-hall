@@ -143,6 +143,8 @@ class TurnPayload(BaseModel):
     attack: str
     question: str
     confidence: float
+    move: dict[str, str] | None = None
+    reaction: str = ""
     raw_text: str | None = None
 
 

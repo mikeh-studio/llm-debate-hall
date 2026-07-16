@@ -4,6 +4,10 @@ import json
 import re
 from typing import Any
 
+MOVE_TYPES = ("challenge", "objection")
+REACTION_TYPES = ("agree", "disagree", "skeptical", "intrigued")
+MOVE_FIELD_MAX_CHARS = 280
+
 
 def extract_json(text: str) -> dict[str, Any] | None:
     match = re.search(r"\{.*\}", text, re.DOTALL)
@@ -27,6 +31,26 @@ def single_paragraph(text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def normalize_turn_move(raw_move: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_move, dict):
+        return None
+    move_type = str(raw_move.get("type", "")).strip().lower()
+    target = single_paragraph(str(raw_move.get("target", "")))
+    if move_type not in MOVE_TYPES or not target:
+        return None
+    return {
+        "type": move_type,
+        "target": target[:MOVE_FIELD_MAX_CHARS],
+        "quote": single_paragraph(str(raw_move.get("quote", "")))[:MOVE_FIELD_MAX_CHARS],
+        "question": single_paragraph(str(raw_move.get("question", "")))[:MOVE_FIELD_MAX_CHARS],
+    }
+
+
+def normalize_turn_reaction(raw_reaction: Any) -> str:
+    reaction = str(raw_reaction or "").strip().lower()
+    return reaction if reaction in REACTION_TYPES else ""
+
+
 def normalize_turn_payload(raw_text: str, agent_name: str, round_type: str) -> dict[str, Any]:
     payload = extract_json(raw_text)
     if not payload:
@@ -42,5 +66,7 @@ def normalize_turn_payload(raw_text: str, agent_name: str, round_type: str) -> d
         "attack": single_paragraph(payload.get("attack", "")),
         "question": single_paragraph(payload.get("question", "")),
         "confidence": float(payload.get("confidence", 0.5)),
+        "move": normalize_turn_move(payload.get("move")),
+        "reaction": normalize_turn_reaction(payload.get("reaction")),
         "raw_text": raw_text,
     }

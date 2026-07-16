@@ -45,6 +45,57 @@ def persona_intensity_guidance(value: float) -> str:
     return "Play the persona at high intensity. Make the worldview unmistakable, but remain coherent and concise."
 
 
+def opponent_names(session: dict[str, Any], agent: dict[str, Any]) -> list[str]:
+    return [
+        item["display_name"]
+        for item in session.get("agents", [])
+        if item.get("role") == "debater" and item.get("id") != agent.get("id")
+    ]
+
+
+def debate_actions_block(session: dict[str, Any], agent: dict[str, Any], round_type: str) -> str:
+    if round_type == "opening":
+        return ""
+    opponents = opponent_names(session, agent)
+    tokens = int(agent.get("moves_remaining") or 0)
+    lines = [
+        "DEBATE ACTIONS:",
+        f"OPPONENTS: {', '.join(opponents) if opponents else 'none'}",
+        f"ACTION TOKENS REMAINING: {tokens}",
+    ]
+    if tokens > 0:
+        lines.append(
+            "You may spend ONE action token this turn by adding an optional \"move\" key to your JSON: "
+            '{"type":"challenge"|"objection","target":"<opponent name>","quote":"<their exact words>",'
+            '"question":"<one direct question>"}. '
+            "A challenge forces the target to answer your question on their next turn. "
+            "An objection formally flags the target's latest claim as unsupported or fallacious. "
+            "Tokens cover the entire debate and never replenish — play one only when it will change the debate. "
+            "Most turns should not include a move."
+        )
+    else:
+        lines.append("You have no action tokens left. Do not include a move.")
+    pending = agent.get("pending_challenge") or {}
+    if pending:
+        quoted = f' (they quoted you: "{pending.get("quote")}")' if pending.get("quote") else ""
+        question = pending.get("question") or "Defend your quoted claim."
+        lines.append(
+            f'INCOMING CHALLENGE from {pending.get("challenger_name", "an opponent")}{quoted}: "{question}" '
+            "You must answer this challenge directly at the start of your response."
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _return_keys_line(round_type: str) -> str:
+    if round_type == "opening":
+        return "Return JSON with keys: display_text, claim, reasoning, attack, question, confidence"
+    return (
+        "Return JSON with keys: display_text, claim, reasoning, attack, question, confidence, "
+        "reaction (agree|disagree|skeptical|intrigued — your honest reaction to the most recent "
+        "opposing argument), and an optional move."
+    )
+
+
 def build_persona_prompt(
     topic: str,
     agent: dict[str, Any],
@@ -86,9 +137,10 @@ def build_turn_prompt(
         f"RULES: {', '.join(persona['debate_rules'])}\n"
         f"INSTRUCTION: {_round_instruction(round_type, debate_mode)}\n"
         f"STYLE CONSTRAINT: {_style_constraint(debate_mode)}\n"
+        f"{debate_actions_block(session, agent, round_type)}"
         "TRANSCRIPT SUMMARY:\n"
         f"{transcript}\n"
-        "Return JSON with keys: display_text, claim, reasoning, attack, question, confidence"
+        f"{_return_keys_line(round_type)}"
     )
 
 
@@ -120,9 +172,10 @@ def build_persistent_turn_prompt(
         f"RULES: {', '.join(persona['debate_rules'])}\n"
         f"INSTRUCTION: {_round_instruction(round_type, debate_mode)}\n"
         f"STYLE CONSTRAINT: {_style_constraint(debate_mode)}\n"
+        f"{debate_actions_block(session, agent, round_type)}"
         "NEW CHAMBER UPDATES SINCE YOUR LAST TURN:\n"
         f"{updates}\n"
-        "Return JSON with keys: display_text, claim, reasoning, attack, question, confidence"
+        f"{_return_keys_line(round_type)}"
     )
 
 
