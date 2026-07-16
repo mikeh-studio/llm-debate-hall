@@ -28,6 +28,11 @@ const LEGACY_DRAFT_STORAGE_KEY = "llm-debate-hall:draft:v1";
 const LEGACY_ARENA_PRESENTATION_STORAGE_KEY = "llm-debate-hall:arena-presentation:v1";
 const DRAFT_STORAGE_KEY = "multi-agent-council:draft:v1";
 const ARENA_PRESENTATION_STORAGE_KEY = "multi-agent-council:arena-presentation:v1";
+const MOVE_BUDGET = 2; // Mirrors DEFAULT_MOVE_BUDGET in storage.py.
+const MOVE_EMOTES = { challenge: "⚔", objection: "!" };
+const MOVE_LABELS = { challenge: "Challenge", objection: "Objection" };
+const REACTION_EMOTES = { agree: "✓", disagree: "✗", skeptical: "?", intrigued: "★" };
+const STAGE_EFFECT_DURATION_MS = 4200;
 const SESSION_SYNC_TIMEOUT_MS = 8000;
 const SESSION_SYNC_INTERVAL_MS = 250;
 const ACTIVE_SESSION_POLL_INTERVAL_MS = 3000;
@@ -56,6 +61,7 @@ const state = {
   personaFeedback: "",
   personaFeedbackKind: "",
   startInFlight: false,
+  stageEffects: {},
   popoverMode: null,
   popoverSeatId: null,
   presentationMode: "classic",
@@ -363,6 +369,7 @@ function clearCurrentRun({ feedbackMessage = "Run cleared. Setup is ready for an
   state.traceEvents = [];
   state.pendingThreadEntry = null;
   state.questionSuggestions = [];
+  clearStageEffects();
   persistDraft();
   setArenaFeedback(feedbackMessage, "success");
   renderArena();
@@ -781,6 +788,42 @@ function personaIntensityLabel(value) {
   return `${Math.round(clampPersonaIntensity(value) * 100)}%`;
 }
 
+function movesRemainingFor(agent) {
+  const raw = agent?.moves_remaining;
+  const value = Number(raw ?? MOVE_BUDGET);
+  if (!Number.isFinite(value)) return MOVE_BUDGET;
+  return Math.max(0, Math.min(MOVE_BUDGET, Math.round(value)));
+}
+
+function tokenPipsMarkup(remaining) {
+  const safe = Math.max(0, Math.min(MOVE_BUDGET, Number(remaining) || 0));
+  const pips = Array.from(
+    { length: MOVE_BUDGET },
+    (_, index) => `<span class="token-pip ${index < safe ? "is-full" : "is-spent"}"></span>`
+  ).join("");
+  const label = `${safe} of ${MOVE_BUDGET} action tokens left`;
+  return `<span class="token-pips" title="${label}" aria-label="${label}">${pips}</span>`;
+}
+
+function triggerStageEffect(actorId, emote, kind, durationMs = STAGE_EFFECT_DURATION_MS) {
+  if (!actorId || !emote) return;
+  const existing = state.stageEffects[actorId];
+  if (existing?.timer) window.clearTimeout(existing.timer);
+  const timer = window.setTimeout(() => {
+    delete state.stageEffects[actorId];
+    renderArenaPresentation();
+  }, durationMs);
+  state.stageEffects[actorId] = { emote, kind, timer };
+  renderArenaPresentation();
+}
+
+function clearStageEffects() {
+  Object.values(state.stageEffects).forEach((effect) => {
+    if (effect?.timer) window.clearTimeout(effect.timer);
+  });
+  state.stageEffects = {};
+}
+
 function setView(view) {
   state.activeView = view;
   document.querySelectorAll(".nav-tab").forEach((button) => {
@@ -944,7 +987,7 @@ function renderParticipantStrip() {
             : "";
         return `
         <div class="participant-chip debater ${speakerId === seat.id ? "is-active-speaker" : ""}" data-seat-id="${escapeHtml(seat.id)}" role="button" tabindex="0">
-          <strong>${escapeHtml(seat.display_name)}</strong>
+          <strong>${escapeHtml(seat.display_name)} ${tokenPipsMarkup(movesRemainingFor(seat))}</strong>
           <span>${escapeHtml((seat.model_name || "No model") + " · " + personaLabel(seat.persona_id) + " · " + sentimentLabel(seat.sentiment) + " · " + personaIntensityLabel(seat.persona_intensity) + sessionStatusNote)}</span>
         </div>
       `;
@@ -1300,6 +1343,35 @@ function threadEntryRoleLabel(entry) {
   return entry.round_type || "Debater";
 }
 
+function threadEntryMoveMarkup(entry) {
+  const payload = entry.payload || {};
+  const parts = [];
+  if (payload.answered_challenge) {
+    const challenge = payload.answered_challenge;
+    const question = challenge.question || challenge.quote || "Defend your position.";
+    parts.push(`
+      <div class="thread-entry-move is-answer">
+        <span class="move-badge">Answering Challenge</span>
+        <span class="move-text">${escapeHtml(challenge.challenger_name || "An opponent")} demanded: “${escapeHtml(question)}”</span>
+      </div>
+    `);
+  }
+  if (payload.move) {
+    const move = payload.move;
+    const label = MOVE_LABELS[move.type] || "Move";
+    const target = move.target_name || move.target || "an opponent";
+    parts.push(`
+      <div class="thread-entry-move is-${escapeHtml(move.type)}">
+        <span class="move-badge">${escapeHtml(`${label} → ${target}`)}</span>
+        ${move.quote ? `<span class="move-quote">“${escapeHtml(move.quote)}”</span>` : ""}
+        ${move.type === "challenge" && move.question ? `<span class="move-text">${escapeHtml(move.question)}</span>` : ""}
+        ${tokenPipsMarkup(move.moves_remaining)}
+      </div>
+    `);
+  }
+  return parts.join("");
+}
+
 function thinkingDotsMarkup(label = "Waiting for response") {
   return `
     <div class="thinking-dots" aria-label="${escapeHtml(label)}">
@@ -1338,6 +1410,7 @@ function renderThread() {
             </div>
             <div class="thread-entry-role">${escapeHtml(entry.round_type || entry.kind)}</div>
           </div>
+          ${threadEntryMoveMarkup(entry)}
           <div class="thread-entry-body">${entry.display_text ? escapeHtml(entry.display_text) : thinkingDotsMarkup(`${entry.display_name || "Speaker"} is thinking`)}</div>
         </article>
       `;
@@ -1420,6 +1493,13 @@ function renderPixelStage() {
   const judge = { ...currentJudge(), role: "judge", spriteIndex: debaters.length };
   const actors = [...debaters, judge];
   const activeEntry = activeStageSpeakerEntry();
+  const phase = currentArenaPhase();
+  const stageLive = ["personas", "opening", "replies", "continue", "judging"].includes(phase);
+  const session = state.activeSession;
+  const winnerId =
+    phase === "complete"
+      ? session?.winner_human || session?.winner_auto || session?.judge_score?.winner_agent_id || null
+      : null;
 
   stage.innerHTML = `
     <div class="pixel-stage-backdrop" aria-hidden="true"></div>
@@ -1432,10 +1512,29 @@ function renderPixelStage() {
             ? thinkingDotsMarkup(`${actor.display_name} is thinking`)
             : escapeHtml(truncateStageBubble(activeEntry?.display_text || ""));
           const roleLabel = actor.role === "judge" ? "Judge" : personaLabel(actor.persona_id);
+          const deliberating = actor.role === "judge" && phase === "judging" && !active;
+          const isVictor = Boolean(winnerId && actor.id === winnerId);
+          const isDimmed = Boolean(winnerId && actor.role === "debater" && actor.id !== winnerId);
+          const effect = state.stageEffects[actor.id];
+          const emoteMarkup = isVictor
+            ? '<div class="stage-emote is-victory" aria-label="Winner">★</div>'
+            : deliberating
+              ? '<div class="stage-emote is-judging" aria-label="Deliberating">⚖</div>'
+              : effect
+                ? `<div class="stage-emote is-${escapeHtml(effect.kind)}" aria-label="Reaction">${escapeHtml(effect.emote)}</div>`
+                : "";
+          const stateClasses = [
+            active ? "is-active-speaker" : "",
+            waitingForText ? "is-thinking" : "",
+            stageLive && !active ? "is-idle" : "",
+            deliberating ? "is-deliberating" : "",
+            isVictor ? "is-victor" : "",
+            isDimmed ? "is-dimmed" : "",
+          ].join(" ");
           return `
             <article
-              class="stage-actor ${escapeHtml(actor.role)} ${active ? "is-active-speaker" : ""} ${waitingForText ? "is-thinking" : ""}"
-              style="--actor-drop:${index % 2 === 0 ? 0 : 8}px"
+              class="stage-actor ${escapeHtml(actor.role)} ${stateClasses}"
+              style="--actor-drop:${index % 2 === 0 ? 0 : 8}px; --idle-delay:${(index * 0.45).toFixed(2)}s"
               aria-label="${escapeHtml(`${actor.display_name}, ${actor.role}`)}"
             >
               ${
@@ -1451,6 +1550,7 @@ function renderPixelStage() {
                   : ""
               }
               <div class="pixel-sprite-frame">
+                ${emoteMarkup}
                 <img
                   class="pixel-sprite"
                   src="${escapeHtml(spriteForActor(actor, actor.spriteIndex))}"
@@ -1460,6 +1560,7 @@ function renderPixelStage() {
               <div class="stage-actor-label">
                 <strong>${escapeHtml(actor.display_name)}</strong>
                 <span>${escapeHtml(roleLabel)}</span>
+                ${actor.role === "debater" ? tokenPipsMarkup(movesRemainingFor(actor)) : ""}
               </div>
             </article>
           `;
@@ -2101,8 +2202,22 @@ async function connectSocket(sessionId) {
           state.pendingThreadEntry = null;
         }
         upsertThreadEntry(event.entry);
+        const reaction = event.entry.kind === "agent" ? event.entry.payload?.reaction : "";
+        if (reaction && REACTION_EMOTES[reaction]) {
+          triggerStageEffect(event.entry.agent_id, REACTION_EMOTES[reaction], `reaction-${reaction}`);
+        }
         renderArenaPresentation();
         renderThread();
+        return;
+      }
+
+      if (event.type === "move_played") {
+        const agent = state.activeSession.agents.find((item) => item.id === event.agent_id);
+        if (agent) agent.moves_remaining = event.moves_remaining;
+        const move = event.move || {};
+        triggerStageEffect(move.target_agent_id, MOVE_EMOTES[move.type] || "!", `move-${move.type}`);
+        renderParticipantStrip();
+        renderArenaPresentation();
         return;
       }
 

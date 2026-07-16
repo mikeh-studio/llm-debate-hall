@@ -1304,6 +1304,7 @@ textarea {
 }
 
 .pixel-sprite-frame {
+  position: relative;
   display: grid;
   place-items: center;
   width: 72px;
@@ -1402,6 +1403,168 @@ textarea {
 @keyframes bubble-live {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-2px); }
+}
+
+.token-pips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+}
+
+.token-pip {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--accent);
+  transform: rotate(45deg);
+}
+
+.token-pip.is-full {
+  background: var(--accent);
+}
+
+.token-pip.is-spent {
+  border-color: var(--rule);
+  background: transparent;
+}
+
+.thread-entry-move {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  margin: 8px 0 10px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  font-size: 0.9rem;
+}
+
+.thread-entry-move.is-objection {
+  border-left-color: var(--accent-dark);
+  background: color-mix(in srgb, var(--accent-dark) 10%, var(--surface));
+}
+
+.thread-entry-move.is-answer {
+  border-left-color: var(--rule);
+  background: color-mix(in srgb, var(--rule) 12%, var(--surface));
+}
+
+.thread-entry-move .move-badge {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent-dark);
+}
+
+.thread-entry-move.is-answer .move-badge {
+  color: var(--muted);
+}
+
+.thread-entry-move .move-quote {
+  font-style: italic;
+  color: var(--muted);
+}
+
+.thread-entry-move .move-text {
+  color: var(--ink);
+}
+
+.stage-emote {
+  position: absolute;
+  top: -14px;
+  right: -10px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 5px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 94%, white 4%);
+  box-shadow: var(--shadow);
+  font-family: var(--font-ui);
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--accent-dark);
+  animation: emote-pop 240ms ease-out;
+}
+
+.stage-emote.is-move-challenge,
+.stage-emote.is-move-objection {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--rule));
+  color: var(--accent-dark);
+  animation: emote-pop 240ms ease-out, emote-shake 600ms ease-in-out 240ms;
+}
+
+.stage-emote.is-victory {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--rule));
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+}
+
+.stage-actor.is-idle .pixel-sprite {
+  animation: sprite-sway 3.4s ease-in-out infinite;
+  animation-delay: var(--idle-delay, 0s);
+}
+
+.stage-actor.is-deliberating .pixel-sprite-frame {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--rule));
+  animation: frame-deliberate 1.4s ease-in-out infinite;
+}
+
+.stage-actor.is-victor .pixel-sprite-frame {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--rule));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent), var(--shadow-lg);
+  animation: sprite-victory 900ms ease-in-out 2;
+}
+
+.stage-actor.is-dimmed {
+  opacity: 0.62;
+  filter: saturate(0.7);
+}
+
+@keyframes sprite-sway {
+  0%, 100% { transform: rotate(0deg); }
+  30% { transform: rotate(-2.4deg); }
+  70% { transform: rotate(2.4deg); }
+}
+
+@keyframes emote-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  70% { transform: scale(1.12); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes emote-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-2px); }
+  75% { transform: translateX(2px); }
+}
+
+@keyframes frame-deliberate {
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 10%, transparent), var(--shadow); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent), var(--shadow); }
+}
+
+@keyframes sprite-victory {
+  0%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-10px); }
+  70% { transform: translateY(-3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage-actor.is-idle .pixel-sprite,
+  .stage-actor.is-deliberating .pixel-sprite-frame,
+  .stage-actor.is-victor .pixel-sprite-frame,
+  .stage-actor.is-active-speaker .pixel-sprite-frame,
+  .stage-emote,
+  .pixel-bubble.is-live {
+    animation: none;
+  }
 }
 
 .arena-composer-shell {
