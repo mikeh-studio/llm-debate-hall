@@ -23,6 +23,8 @@
     "focus on what unlocks abundance",
     "weigh tradeoffs instead of seeking purit"
   ],
+  "icon_path": "/persona-icons/8b86b0f10cc24da4881794a92a88d316.svg",
+  "icon_style_tag": "generated-pixel-creature",
   "is_builtin": false,
   "is_user_editable": true,
   "is_selectable": true,

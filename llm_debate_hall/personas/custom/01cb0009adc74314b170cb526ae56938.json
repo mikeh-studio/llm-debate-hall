@@ -27,6 +27,8 @@
     "tolerate being unpopular",
     "optimize for truth not comfort"
   ],
+  "icon_path": "/persona-icons/01cb0009adc74314b170cb526ae56938.svg",
+  "icon_style_tag": "generated-pixel-creature",
   "is_builtin": false,
   "is_user_editable": true,
   "is_selectable": true,
