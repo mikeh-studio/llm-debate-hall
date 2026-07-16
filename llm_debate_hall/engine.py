@@ -248,6 +248,9 @@ class DebateEngine:
         agent: dict[str, Any],
     ) -> None:
         session = self.storage.get_session(session_id)
+        # Re-read the agent so move budget and pending challenges reflect earlier turns this round.
+        agent = next((item for item in session["agents"] if item["id"] == agent["id"]), agent)
+        incoming_challenges = agent.get("pending_challenges") or []
         adapter = self.adapter_factory(agent)
         thread_entry_id = uuid.uuid4().hex
         turn_started_at = time.perf_counter()
@@ -320,6 +323,10 @@ class DebateEngine:
         )
         response = generation.response
         payload = normalize_turn_payload(response.raw_text, agent["display_name"], round_type)
+        resolved_move = self._resolve_move(session, agent, payload, round_type)
+        if incoming_challenges:
+            payload["answered_challenges"] = incoming_challenges
+            self.storage.clear_agent_pending_challenges(agent["id"])
         usage = estimate_usage(generation.prompt, response.raw_text, agent["preset_id"], agent["model_name"])
         latency_ms = round((time.perf_counter() - turn_started_at) * 1000)
         current_provider_session = self.storage.get_provider_session(agent["id"])
@@ -371,6 +378,79 @@ class DebateEngine:
             {"type": "message_saved", "message": {**message, "agent_name": agent["display_name"]}},
         )
         await self.broker.publish(session_id, {"type": "thread_entry_saved", "entry": thread_entry})
+        if resolved_move:
+            await self._publish_trace_event(
+                session_id,
+                event_type="move_played",
+                round_type=round_type,
+                round_index=round_index,
+                agent_id=agent["id"],
+                payload={
+                    "summary": (
+                        f"{agent['display_name']} played a {resolved_move['type']} "
+                        f"on {resolved_move['target_name']}."
+                    ),
+                    "move": resolved_move,
+                },
+            )
+            await self.broker.publish(
+                session_id,
+                {
+                    "type": "move_played",
+                    "agent_id": agent["id"],
+                    "agent_name": agent["display_name"],
+                    "move": resolved_move,
+                    "moves_remaining": resolved_move["moves_remaining"],
+                },
+            )
+
+    def _resolve_move(
+        self,
+        session: dict[str, Any],
+        agent: dict[str, Any],
+        payload: dict[str, Any],
+        round_type: str,
+    ) -> dict[str, Any] | None:
+        move = payload.get("move")
+        payload["move"] = None
+        if not move or round_type == "opening":
+            return None
+        if int(agent.get("moves_remaining") or 0) <= 0:
+            return None
+        target_name = move["target"].strip().lower()
+        target = next(
+            (
+                item
+                for item in session["agents"]
+                if item["role"] == "debater"
+                and item["id"] != agent["id"]
+                and item["display_name"].strip().lower() == target_name
+            ),
+            None,
+        )
+        if target is None:
+            return None
+        moves_remaining = self.storage.spend_agent_move(agent["id"])
+        agent["moves_remaining"] = moves_remaining
+        resolved = {
+            **move,
+            "target": target["display_name"],
+            "target_agent_id": target["id"],
+            "target_name": target["display_name"],
+            "moves_remaining": moves_remaining,
+        }
+        if move["type"] == "challenge":
+            self.storage.append_agent_pending_challenge(
+                target["id"],
+                {
+                    "challenger_id": agent["id"],
+                    "challenger_name": agent["display_name"],
+                    "quote": move["quote"],
+                    "question": move["question"],
+                },
+            )
+        payload["move"] = resolved
+        return resolved
 
     async def _judge_session(self, session_id: str, topic: str, judge: dict[str, Any]) -> None:
         await self.judge_service.judge_session(session_id, topic, judge)

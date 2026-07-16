@@ -24,6 +24,9 @@ from llm_debate_hall.workspace import (
 )
 
 
+DEFAULT_MOVE_BUDGET = 2
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -103,6 +106,8 @@ class Storage:
                     env_json TEXT NOT NULL,
                     persona_id TEXT,
                     persona_intensity REAL NOT NULL DEFAULT 1.0,
+                    moves_remaining INTEGER NOT NULL DEFAULT 2,
+                    pending_challenge_json TEXT,
                     ordering INTEGER NOT NULL
                 );
 
@@ -183,6 +188,8 @@ class Storage:
             self._ensure_column(conn, "sessions", "topic_type", f"ALTER TABLE sessions ADD COLUMN topic_type TEXT NOT NULL DEFAULT '{DEFAULT_TOPIC_TYPE}'")
             self._ensure_column(conn, "sessions", "topic_tags_json", "ALTER TABLE sessions ADD COLUMN topic_tags_json TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(conn, "session_agents", "sentiment", f"ALTER TABLE session_agents ADD COLUMN sentiment TEXT NOT NULL DEFAULT '{DEFAULT_SENTIMENT}'")
+            self._ensure_column(conn, "session_agents", "moves_remaining", f"ALTER TABLE session_agents ADD COLUMN moves_remaining INTEGER NOT NULL DEFAULT {DEFAULT_MOVE_BUDGET}")
+            self._ensure_column(conn, "session_agents", "pending_challenge_json", "ALTER TABLE session_agents ADD COLUMN pending_challenge_json TEXT")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
         columns = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -466,6 +473,48 @@ class Storage:
                 "UPDATE session_agents SET persona_id = ? WHERE id = ?",
                 (persona_id, agent_id),
             )
+
+    def spend_agent_move(self, agent_id: str) -> int:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE session_agents SET moves_remaining = MAX(moves_remaining - 1, 0) WHERE id = ?",
+                (agent_id,),
+            )
+            row = conn.execute(
+                "SELECT moves_remaining FROM session_agents WHERE id = ?", (agent_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown agent: {agent_id}")
+        return int(row["moves_remaining"])
+
+    def append_agent_pending_challenge(self, agent_id: str, challenge: dict[str, Any]) -> None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT pending_challenge_json FROM session_agents WHERE id = ?", (agent_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown agent: {agent_id}")
+            challenges = [*self._pending_challenges_from_json(row["pending_challenge_json"]), challenge]
+            conn.execute(
+                "UPDATE session_agents SET pending_challenge_json = ? WHERE id = ?",
+                (json.dumps(challenges), agent_id),
+            )
+
+    def clear_agent_pending_challenges(self, agent_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE session_agents SET pending_challenge_json = NULL WHERE id = ?",
+                (agent_id,),
+            )
+
+    @staticmethod
+    def _pending_challenges_from_json(raw: str | None) -> list[dict[str, Any]]:
+        if not raw:
+            return []
+        payload = json.loads(raw)
+        if isinstance(payload, dict):
+            return [payload]
+        return list(payload)
 
     def get_provider_session(self, agent_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -903,6 +952,10 @@ class Storage:
             "env": json.loads(row["env_json"]),
             "persona_id": row["persona_id"],
             "persona_intensity": float(row["persona_intensity"] if row["persona_intensity"] is not None else 1.0),
+            "moves_remaining": int(
+                row["moves_remaining"] if row["moves_remaining"] is not None else DEFAULT_MOVE_BUDGET
+            ),
+            "pending_challenges": self._pending_challenges_from_json(row["pending_challenge_json"]),
             "ordering": row["ordering"],
         }
 

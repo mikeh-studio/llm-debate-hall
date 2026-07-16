@@ -45,6 +45,56 @@ def persona_intensity_guidance(value: float) -> str:
     return "Play the persona at high intensity. Make the worldview unmistakable, but remain coherent and concise."
 
 
+def opponent_names(session: dict[str, Any], agent: dict[str, Any]) -> list[str]:
+    return [
+        item["display_name"]
+        for item in session.get("agents", [])
+        if item.get("role") == "debater" and item.get("id") != agent.get("id")
+    ]
+
+
+def debate_actions_block(session: dict[str, Any], agent: dict[str, Any], round_type: str) -> str:
+    if round_type == "opening":
+        return ""
+    opponents = opponent_names(session, agent)
+    tokens = int(agent.get("moves_remaining") or 0)
+    lines = [
+        "DEBATE ACTIONS:",
+        f"OPPONENTS: {', '.join(opponents) if opponents else 'none'}",
+        f"ACTION TOKENS REMAINING: {tokens}",
+    ]
+    if tokens > 0:
+        lines.append(
+            "You may spend ONE action token this turn by adding an optional \"move\" key to your JSON: "
+            '{"type":"challenge"|"objection","target":"<opponent name>","quote":"<their exact words>",'
+            '"question":"<one direct question>"}. '
+            "A challenge forces the target to answer your question on their next turn. "
+            "An objection formally flags the target's latest claim as unsupported or fallacious. "
+            "Tokens cover the entire debate and never replenish — play one only when it will change the debate. "
+            "Most turns should not include a move."
+        )
+    else:
+        lines.append("You have no action tokens left. Do not include a move.")
+    for pending in agent.get("pending_challenges") or []:
+        quoted = f' (they quoted you: "{pending.get("quote")}")' if pending.get("quote") else ""
+        question = pending.get("question") or "Defend your quoted claim."
+        lines.append(
+            f'INCOMING CHALLENGE from {pending.get("challenger_name", "an opponent")}{quoted}: "{question}" '
+            "You must answer this challenge directly at the start of your response."
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _return_keys_line(round_type: str) -> str:
+    if round_type == "opening":
+        return "Return JSON with keys: display_text, claim, reasoning, attack, question, confidence"
+    return (
+        "Return JSON with keys: display_text, claim, reasoning, attack, question, confidence, "
+        "reaction (agree|disagree|skeptical|intrigued — your honest reaction to the most recent "
+        "opposing argument), and an optional move."
+    )
+
+
 def build_persona_prompt(
     topic: str,
     agent: dict[str, Any],
@@ -86,9 +136,10 @@ def build_turn_prompt(
         f"RULES: {', '.join(persona['debate_rules'])}\n"
         f"INSTRUCTION: {_round_instruction(round_type, debate_mode)}\n"
         f"STYLE CONSTRAINT: {_style_constraint(debate_mode)}\n"
+        f"{debate_actions_block(session, agent, round_type)}"
         "TRANSCRIPT SUMMARY:\n"
         f"{transcript}\n"
-        "Return JSON with keys: display_text, claim, reasoning, attack, question, confidence"
+        f"{_return_keys_line(round_type)}"
     )
 
 
@@ -120,9 +171,10 @@ def build_persistent_turn_prompt(
         f"RULES: {', '.join(persona['debate_rules'])}\n"
         f"INSTRUCTION: {_round_instruction(round_type, debate_mode)}\n"
         f"STYLE CONSTRAINT: {_style_constraint(debate_mode)}\n"
+        f"{debate_actions_block(session, agent, round_type)}"
         "NEW CHAMBER UPDATES SINCE YOUR LAST TURN:\n"
         f"{updates}\n"
-        "Return JSON with keys: display_text, claim, reasoning, attack, question, confidence"
+        f"{_return_keys_line(round_type)}"
     )
 
 
@@ -171,7 +223,7 @@ def _blinded_transcript(session: dict[str, Any], label_by_agent_id: dict[str, st
         else:
             speaker = "Moderator"
         phase = item.get("round_type") or item.get("kind", "entry")
-        display_text = single_paragraph(item["display_text"])
+        display_text = single_paragraph(item["display_text"]) + _move_annotation(item)
         for display_name, replacement in name_to_label.items():
             display_text = re.sub(re.escape(display_name), replacement, display_text, flags=re.IGNORECASE)
         lines.append(f"{phase} | {speaker} | {display_text}")
@@ -194,6 +246,7 @@ def conversation_entries(session: dict[str, Any]) -> list[dict[str, Any]]:
             "agent_id": item["agent_id"],
             "display_name": item.get("agent_name", item["agent_id"]),
             "display_text": item["display_text"],
+            "payload": item.get("normalized_payload") or {},
         }
         for item in session.get("messages", [])
     ]
@@ -255,6 +308,20 @@ def _style_constraint(debate_mode: str) -> str:
     return STYLE_CONSTRAINT
 
 
+def _move_annotation(item: dict[str, Any]) -> str:
+    payload = item.get("payload") or {}
+    move = payload.get("move")
+    if not move:
+        return ""
+    target = move.get("target_name") or move.get("target") or "an opponent"
+    detail = move.get("question") if move.get("type") == "challenge" else move.get("quote")
+    detail_text = f': "{detail}"' if detail else ""
+    return f" [{str(move.get('type', 'move')).upper()} -> {target}{detail_text}]"
+
+
 def _format_conversation_entry(item: dict[str, Any]) -> str:
     display_name = item.get("display_name", item.get("agent_name", item.get("agent_id", "Moderator")))
-    return f"{item.get('round_type') or item['kind']} | {display_name} | {single_paragraph(item['display_text'])}"
+    return (
+        f"{item.get('round_type') or item['kind']} | {display_name} | "
+        f"{single_paragraph(item['display_text'])}{_move_annotation(item)}"
+    )

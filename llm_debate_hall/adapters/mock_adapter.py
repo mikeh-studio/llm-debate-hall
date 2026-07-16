@@ -96,22 +96,43 @@ class MockDebateAdapter(DebateAdapter):
             )
         else:
             phase = request.output_mode.replace("_", " ")
-            raw_text = json.dumps(
-                {
-                    "display_text": (
-                        f"{request.agent_name} delivers a focused {phase} paragraph that presses one clear claim, "
-                        "answers the prior exchange directly, and closes on a concrete line of attack."
-                    ),
-                    "claim": f"{request.agent_name} makes a focused claim about the topic.",
-                    "reasoning": [
-                        "The argument defines terms before taking a stance.",
-                        "The argument responds directly to the latest opposing point.",
-                    ],
-                    "attack": "The opponent relies on an under-specified assumption.",
-                    "question": "What evidence would make you revise your position?",
-                    "confidence": 0.72,
-                }
+            opponents = [
+                item.strip()
+                for item in self._line_value(request.prompt, "OPPONENTS:").split(",")
+                if item.strip() and item.strip().lower() != "none"
+            ]
+            tokens_remaining = self._int_line_value(request.prompt, "ACTION TOKENS REMAINING:")
+            incoming_challenge = "INCOMING CHALLENGE" in request.prompt
+            display_text = (
+                f"{request.agent_name} delivers a focused {phase} paragraph that presses one clear claim, "
+                "answers the prior exchange directly, and closes on a concrete line of attack."
             )
+            if incoming_challenge:
+                display_text = (
+                    f"{request.agent_name} answers the incoming challenge head-on before pressing "
+                    "the argument forward. " + display_text
+                )
+            payload: dict[str, object] = {
+                "display_text": display_text,
+                "claim": f"{request.agent_name} makes a focused claim about the topic.",
+                "reasoning": [
+                    "The argument defines terms before taking a stance.",
+                    "The argument responds directly to the latest opposing point.",
+                ],
+                "attack": "The opponent relies on an under-specified assumption.",
+                "question": "What evidence would make you revise your position?",
+                "confidence": 0.72,
+            }
+            if request.output_mode != "opening":
+                payload["reaction"] = "disagree"
+                if opponents and tokens_remaining > 0 and not incoming_challenge:
+                    payload["move"] = {
+                        "type": "challenge",
+                        "target": opponents[0],
+                        "quote": "a focused claim about the topic",
+                        "question": "What single piece of evidence carries your whole position?",
+                    }
+            raw_text = json.dumps(payload)
 
         try:
             display_text = json.loads(raw_text).get("display_text", raw_text)
@@ -131,8 +152,15 @@ class MockDebateAdapter(DebateAdapter):
     def _line_value(self, prompt: str, prefix: str) -> str:
         for line in prompt.splitlines():
             if line.startswith(prefix):
-                return line.split(":", 1)[1].strip()
+                return line[len(prefix) :].strip()
         return ""
+
+    def _int_line_value(self, prompt: str, prefix: str) -> int:
+        value = self._line_value(prompt, prefix)
+        try:
+            return int(value)
+        except ValueError:
+            return 0
 
     def _suggestions(self, seed: str) -> list[str]:
         base = seed.rstrip("?") or "autonomous agents"
