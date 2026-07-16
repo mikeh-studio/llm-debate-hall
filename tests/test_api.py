@@ -407,6 +407,26 @@ def test_api_session_workspace_metadata_roundtrip_and_patch(tmp_path: Path) -> N
     assert listed["agents"][0]["sentiment"] == "skeptical"
 
 
+def test_api_rejects_duplicate_debater_names(tmp_path: Path) -> None:
+    app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/sessions",
+        json={
+            "topic": "Can two debaters share a name?",
+            "agents": [
+                {"display_name": "Athena", "preset_id": "mock", "model_name": "mock-model"},
+                {"display_name": " athena ", "preset_id": "mock", "model_name": "mock-model"},
+            ],
+            "judge": {"display_name": "Solon", "preset_id": "mock", "model_name": "mock-model"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "unique" in response.json()["detail"]
+
+
 def test_api_session_flow_pause_then_judge_decision(tmp_path: Path) -> None:
     app = create_app(str(tmp_path / "debate.db"), personas_root=str(tmp_path / "personas"))
     client = TestClient(app)

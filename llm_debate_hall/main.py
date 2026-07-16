@@ -402,6 +402,12 @@ def create_app(db_path: str | None = None, personas_root: str | None = None) -> 
     async def create_session(payload: CreateSessionRequest) -> dict:
         if len(payload.agents) < 2 or len(payload.agents) > 5:
             raise HTTPException(status_code=400, detail="Debates must have between 2 and 5 debaters.")
+        normalized_names = [agent.display_name.strip().lower() for agent in payload.agents]
+        if len(set(normalized_names)) != len(normalized_names):
+            raise HTTPException(
+                status_code=400,
+                detail="Debater names must be unique so debate actions can target them unambiguously.",
+            )
         agent_payloads = []
         for agent in payload.agents:
             preset = PRESET_REGISTRY.get(agent.preset_id)

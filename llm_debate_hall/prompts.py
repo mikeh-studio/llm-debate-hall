@@ -223,7 +223,7 @@ def _blinded_transcript(session: dict[str, Any], label_by_agent_id: dict[str, st
         else:
             speaker = "Moderator"
         phase = item.get("round_type") or item.get("kind", "entry")
-        display_text = single_paragraph(item["display_text"])
+        display_text = single_paragraph(item["display_text"]) + _move_annotation(item)
         for display_name, replacement in name_to_label.items():
             display_text = re.sub(re.escape(display_name), replacement, display_text, flags=re.IGNORECASE)
         lines.append(f"{phase} | {speaker} | {display_text}")
@@ -246,6 +246,7 @@ def conversation_entries(session: dict[str, Any]) -> list[dict[str, Any]]:
             "agent_id": item["agent_id"],
             "display_name": item.get("agent_name", item["agent_id"]),
             "display_text": item["display_text"],
+            "payload": item.get("normalized_payload") or {},
         }
         for item in session.get("messages", [])
     ]
@@ -307,6 +308,20 @@ def _style_constraint(debate_mode: str) -> str:
     return STYLE_CONSTRAINT
 
 
+def _move_annotation(item: dict[str, Any]) -> str:
+    payload = item.get("payload") or {}
+    move = payload.get("move")
+    if not move:
+        return ""
+    target = move.get("target_name") or move.get("target") or "an opponent"
+    detail = move.get("question") if move.get("type") == "challenge" else move.get("quote")
+    detail_text = f': "{detail}"' if detail else ""
+    return f" [{str(move.get('type', 'move')).upper()} -> {target}{detail_text}]"
+
+
 def _format_conversation_entry(item: dict[str, Any]) -> str:
     display_name = item.get("display_name", item.get("agent_name", item.get("agent_id", "Moderator")))
-    return f"{item.get('round_type') or item['kind']} | {display_name} | {single_paragraph(item['display_text'])}"
+    return (
+        f"{item.get('round_type') or item['kind']} | {display_name} | "
+        f"{single_paragraph(item['display_text'])}{_move_annotation(item)}"
+    )

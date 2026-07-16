@@ -238,6 +238,38 @@ def test_engine_enforces_move_budget_and_challenge_obligations(tmp_path: Path) -
     assert agents["Athena"]["pending_challenges"] == []
 
 
+def test_moves_are_visible_in_prompt_summaries_and_blinded_judge_transcript() -> None:
+    from llm_debate_hall.prompts import _blinded_transcript, summarize_messages
+
+    session = {
+        "agents": [
+            {"id": "a1", "display_name": "Athena", "role": "debater"},
+            {"id": "a2", "display_name": "Burke", "role": "debater"},
+        ],
+        "thread_entries": [
+            {
+                "kind": "agent",
+                "round_type": "reply",
+                "round_index": 2,
+                "agent_id": "a1",
+                "display_name": "Athena",
+                "display_text": "I object to this framing.",
+                "payload": {
+                    "move": {"type": "objection", "target_name": "Burke", "quote": "growth fixes everything"}
+                },
+            }
+        ],
+        "messages": [],
+    }
+
+    summary = summarize_messages(session)
+    assert '[OBJECTION -> Burke: "growth fixes everything"]' in summary
+
+    blinded = _blinded_transcript(session, {"a1": "A", "a2": "B"})
+    assert "OBJECTION -> Candidate B" in blinded
+    assert "Burke" not in blinded
+
+
 def test_engine_queues_concurrent_challenges_on_the_same_target(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "debate.db", personas_root_path=tmp_path / "personas")
     engine = DebateEngine(storage=storage, broker=EventBroker())
